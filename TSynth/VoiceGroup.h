@@ -17,6 +17,11 @@
     }
 
 // These are here because of a Settings.h circular dependency.
+// Maximum combined gain of Osc 1 + Osc 2 + XOR into the waveform mixer.
+// Band-limited squares peak at ~0.95 FS, so a higher total clips the 16-bit
+// mixer and the clipped edges alias badly.
+#define OSCMIX_MAX_SUM 1.0f
+
 #define MONOPHONIC_OFF 0
 #define MONOPHONIC_LAST 1
 #define MONOPHONIC_FIRST 2
@@ -60,6 +65,8 @@ private:
     uint8_t oscFX;
     float oscLevelA;
     float oscLevelB;
+    float waveformLevels[4] = {1.0f, 1.0f, 1.0f, 0.0f}; // Requested waveform mixer levels (before headroom scaling)
+    float oscMixCompensation = 1.0f;                     // Restores loudness lost to headroom scaling, applied after the filter
     float cutoff;
     float resonance;
     float filterMixer;
@@ -448,7 +455,20 @@ public:
 
     void setWaveformMixerLevel(int channel, float level)
     {
-        VG_FOR_EACH_OSC(waveformMixer_.gain(channel, level))
+        waveformLevels[channel] = level;
+        if (channel == 2)
+        {
+            VG_FOR_EACH_OSC(waveformMixer_.gain(2, level))
+            return;
+        }
+        // Scale the oscillator channels together so their sum can't clip the mixer
+        float sum = waveformLevels[0] + waveformLevels[1] + waveformLevels[3];
+        float scale = sum > OSCMIX_MAX_SUM ? OSCMIX_MAX_SUM / sum : 1.0f;
+        // Uncorrelated oscillators add by power, so compensate by sqrt to keep perceived level
+        oscMixCompensation = 1.0f / sqrtf(scale);
+        VG_FOR_EACH_OSC(waveformMixer_.gain(0, waveformLevels[0] * scale))
+        VG_FOR_EACH_OSC(waveformMixer_.gain(1, waveformLevels[1] * scale))
+        VG_FOR_EACH_OSC(waveformMixer_.gain(3, waveformLevels[3] * scale))
     }
 
     void setOscModMixerA(int channel, float level)
@@ -1116,7 +1136,7 @@ private:
         {
         case 0:
         {
-            this->_params.mixerLevel = VOICEMIXERLEVEL;
+            this->_params.mixerLevel = VOICEMIXERLEVEL * oscMixCompensation;
             Voice *v = this->getVoice();
             if (!v->on())
                 this->voicesOn++;
@@ -1128,7 +1148,7 @@ private:
             if (!this->monophonic)
                 this->unisonNotesOn++;
 
-            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL;
+            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL * oscMixCompensation;
 
             uint8_t maxUnison = voices.size() / MINUNISONVOICES;
             uint8_t tally[maxUnison] = {};
@@ -1195,7 +1215,7 @@ private:
             break;
         }
         case 2:
-            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL;
+            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL * oscMixCompensation;
             allNotesOn(note, velocity, 0);
             break;
         }
