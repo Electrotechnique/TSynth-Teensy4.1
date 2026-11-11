@@ -21,88 +21,41 @@
    THE SOFTWARE.
 */
 
-// V. Pearson: Implemented delay buffer interpolation with floating point fractional indices and using a larger table
-// to reduce audible delay sweep quantization noise.
-// The fractional indices are stored in flash memory instead of being calculated at runtime and stored in RAM.
-// #define LARGE_ENSEMBLE_LFO_TABLE uses a larger lfo table with only delay buffer interpolation.
-// This is more precise and is slightly faster but takes more flash memory.
-// With it undefined, lfo table and delay buffer interpolation are implemented with some extra processing and a smaller lfo table. 
-
-#define LARGE_ENSEMBLE_LFO_TABLE
+// String machine style ensemble chorus (after the Roland RS-202 / Lowrey Symphonic Strings).
+// Six modulated delay taps, each driven by a slow + fast sine LFO pair, 60 degrees apart.
+// The right channel uses the same taps with the LFO shifted by 90 degrees for stereo spread.
+//
+// The LFO and delay interpolation are computed per sample in fixed point, so the delay
+// time glides smoothly instead of stepping (stepping caused audible zipper/grit noise).
 
 #ifndef effect_ensemble_h_
 #define effect_ensemble_h_
 
 #include <Arduino.h>
 #include "AudioStream.h"
-#define ENSEMBLE_BUFFER_SIZE 1024
-// to put a channel 90 degrees out of LFO phase for stereo spread
-#define PHASE_90 367
 
-// LFO wavetable parameters
-#ifdef LARGE_ENSEMBLE_LFO_TABLE
-  #define LFO_SAMPLES (1470*4) // number of samples in tablle
-  #define LFO_SIZE (1470*4) // number of effective values (no interpolation so same as table size).
-  #define COUNTS_PER_LFO (200/4) // Adjust for larger table so the rate is the same.
-#else
-  #define LFO_SAMPLES 1470 // number of samples in table
-  #define LFO_SIZE (1470*4) // number of effective values interpolated from table
-  #define COUNTS_PER_LFO (200/4) // Adjust for larger effective table so the rate is the same.
-#endif
-
-#define LFO_RANGE 110
+#define ENSEMBLE_BUFFER_SIZE 1024 // must be a power of two
+#define ENSEMBLE_BUFFER_MASK (ENSEMBLE_BUFFER_SIZE - 1)
+#define ENSEMBLE_TAPS 6
 
 class AudioEffectEnsemble : public AudioStream
 {
-  public:
-    AudioEffectEnsemble(void);
-    virtual void update(void);
-    void lfoRate(float rate);
+public:
+  AudioEffectEnsemble(void);
+  virtual void update(void);
+  // Rate is the effect amount (2.0 - 20.0); same mapping as the original table based version
+  void lfoRate(float rate);
 
-  private:
-    audio_block_t *inputQueueArray[1];
-    // buffers
-    int16_t delayBuffer[ENSEMBLE_BUFFER_SIZE];
+private:
+  audio_block_t *inputQueueArray[1];
+  int16_t delayBuffer[ENSEMBLE_BUFFER_SIZE];
+  uint16_t writeIndex;
+  uint32_t lfoPhaseSlow;
+  uint32_t lfoPhaseFast;
+  uint32_t lfoIncSlow;
+  uint32_t lfoIncFast;
 
-    // LFO wavetable
-    const static float PROGMEM lfoTable[];
-
-    // input index
-    int16_t inIndex;
-    // output indexes
-    // default to csenter of buffer
-    int16_t outIndex1;
-    int16_t outIndex2;
-    int16_t outIndex3;
-    int16_t outIndex4;
-    int16_t outIndex5;
-    int16_t outIndex6;
-    // lfo index
-    // seprated by thirds to approximate 120 degree phase relationship
-    int16_t lfoIndex1;
-    int16_t lfoIndex2;
-    int16_t lfoIndex3;
-    int16_t lfoIndex4;
-    int16_t lfoIndex5;
-    int16_t lfoIndex6;
-    // lfo rate counter
-    int16_t lfoCount;
-    // output index offset
-    float offset1;
-    float offset2;
-    float offset3;
-    float offset4;
-    float offset5;
-    float offset6;
-    //Default countsPerLfo
-    int countsPerLfo = COUNTS_PER_LFO;
-    int16_t interpBuffer(float findex);
-    
-    #ifndef LARGE_ENSEMBLE_LFO_TABLE
-    float lfoLookup(int16_t lfoIndex);
-    #endif
-
+  inline int32_t readTap(int32_t delayQ16);
 };
-
 
 #endif
