@@ -407,9 +407,21 @@ FLASHMEM void enableScope(boolean enable) {
   enable ? global.scope.ScreenSetup(&tft) : global.scope.ScreenSetup(NULL);
 }
 
+// Send the frame buffer to the display using DMA so the CPU is free during the
+// SPI transfer. Falls back to a blocking update if DMA can't be started.
+void updateScreenDMA() {
+  if (tft.updateScreenAsync(false)) {
+    while (tft.asyncUpdateActive()) threads.yield();
+  } else {
+    tft.updateScreen();
+  }
+}
+
 void displayThread() {
   threads.delay(2000); //Give bootup page chance to display
+  elapsedMillis frameTime;
   while (1) {
+    frameTime = 0;
     switch (state) {
       case PARAMETER:
         if ((millis() - timer) > DISPLAYTIMEOUT) {
@@ -428,7 +440,7 @@ void displayThread() {
         break;
       case REINITIALISE:
         renderReinitialisePage();
-        tft.updateScreen(); //update before delay
+        updateScreenDMA(); //update before delay
         threads.delay(1000);
         state = PARAMETER;
         break;
@@ -449,9 +461,9 @@ void displayThread() {
         renderSettingsPage();
         break;
     }
-    tft.updateScreen();
-    // Yield the CPU back to the main loop (MIDI handling) instead of redrawing continuously
-    threads.delay(DISPLAY_FRAME_MS);
+    updateScreenDMA();
+    // Yield the CPU back to the main loop (MIDI handling) for the rest of the frame
+    if (frameTime < DISPLAY_FRAME_MS) threads.delay(DISPLAY_FRAME_MS - frameTime);
   }
 }
 
