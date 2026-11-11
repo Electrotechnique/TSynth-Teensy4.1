@@ -36,6 +36,16 @@ extern "C"
 
 #define BASE_DELAY 512 // samples (~11.6ms)
 
+// The six taps are partly decorrelated, so their average is 4-9dB quieter than the
+// input (more for bright sounds). Output = sum of taps / WET_DIVISOR: 6 = plain average,
+// 3 = +6dB make-up gain so the level holds up at 100% effect mix.
+#define WET_DIVISOR 3
+
+static inline int16_t saturate16(int32_t v)
+{
+  return v > 32767 ? 32767 : (v < -32768 ? -32768 : (int16_t)v);
+}
+
 // LFO depths in samples, scaled by 256 (Q8). Original table: 110/2 and 110/3 samples.
 #define SLOW_DEPTH_Q8 14080 // 55.0 * 256
 #define FAST_DEPTH_Q8 9387  // 36.67 * 256
@@ -143,8 +153,8 @@ void AudioEffectEnsemble::update(void)
       // Right: fast LFO is shifted 180 degrees, i.e. negated
       sumR += readTap(baseQ16 - lfoQ16(sineQ15(phS + RIGHT_OFFSET_SLOW), -fast));
     }
-    outblock->data[i] = (int16_t)(sumL / ENSEMBLE_TAPS);
-    outblockB->data[i] = (int16_t)(sumR / ENSEMBLE_TAPS);
+    outblock->data[i] = saturate16(sumL / WET_DIVISOR);
+    outblockB->data[i] = saturate16(sumR / WET_DIVISOR);
 
     lfoPhaseSlow += incSlow;
     lfoPhaseFast += incFast;
