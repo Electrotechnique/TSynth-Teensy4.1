@@ -7,6 +7,8 @@
 #define dc 3
 #define rst 9
 #define DISPLAYTIMEOUT 700
+#define DISPLAY_FRAME_MS 30      // Minimum time between screen refreshes (~33fps max)
+#define DISPLAY_THREAD_TICKS 1   // Display thread time slice in 1ms ticks. Main loop (MIDI) waits at most this long
 
 #include <Adafruit_GFX.h>
 #include "ST7735_t3.h" // Local copy from TD1.48 that works for 0.96" IPS 160x80 display
@@ -448,6 +450,8 @@ void displayThread() {
         break;
     }
     tft.updateScreen();
+    // Yield the CPU back to the main loop (MIDI handling) instead of redrawing continuously
+    threads.delay(DISPLAY_FRAME_MS);
   }
 }
 
@@ -459,7 +463,9 @@ void setupDisplay() {
   tft.invertDisplay(true);
   renderBootUpPage();
   tft.updateScreen();
-  threads.addThread(displayThread);
+  int displayThreadId = threads.addThread(displayThread);
+  // Default slice is 10ms, which could hold off MIDI note handling by up to 10ms
+  if (displayThreadId > 0) threads.setTimeSlice(displayThreadId, DISPLAY_THREAD_TICKS);
 }
 
 #endif

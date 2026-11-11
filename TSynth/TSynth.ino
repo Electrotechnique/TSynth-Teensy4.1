@@ -84,6 +84,7 @@ Global global{VOICEMIXERLEVEL};
 std::vector<VoiceGroup *> groupvec;
 uint8_t activeGroupIndex = 0;
 uint8_t loopCount = 0;
+#define MIDI_READS_PER_LOOP 16
 
 boolean usbHostPluggedIn = false;
 elapsedMillis usb_host_wait_timer;
@@ -242,12 +243,17 @@ void myNoteOn(byte channel, byte note, byte velocity)
   if (note + groupvec[activeGroupIndex]->params().oscPitchA < 0 || note + groupvec[activeGroupIndex]->params().oscPitchA > 127 || note + groupvec[activeGroupIndex]->params().oscPitchB < 0 || note + groupvec[activeGroupIndex]->params().oscPitchB > 127)
     return;
 
+  // Apply envelope triggers and pitch changes within the same audio block
+  AudioNoInterrupts();
   groupvec[activeGroupIndex]->noteOn(note, velocity);
+  AudioInterrupts();
 }
 
 void myNoteOff(byte channel, byte note, byte velocity)
 {
+  AudioNoInterrupts();
   groupvec[activeGroupIndex]->noteOff(note);
+  AudioInterrupts();
 }
 
 int getLFOWaveform(int value)
@@ -1161,7 +1167,7 @@ FLASHMEM void myMIDIClockStop()
   setMIDIClkSignal(false);
 }
 
-FLASHMEM void myMIDIClock()
+void myMIDIClock()
 {
   // This recalculates the LFO frequencies if the tempo changes (MIDI cLock is 24ppq)
   if (count > 23)
@@ -1837,12 +1843,16 @@ void CPUMonitor()
 void loop()
 {
   // USB HOST MIDI Class Compliant
-   myusb.Task();
-  midi1.read(midiChannel);
+  myusb.Task();
+  // Drain pending MIDI messages (bounded) so notes aren't queued behind clock/CC traffic
+  for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && midi1.read(midiChannel); i++)
+    ;
   // USB Client MIDI
-  usbMIDI.read(midiChannel);
+  for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && usbMIDI.read(midiChannel); i++)
+    ;
   // MIDI 5 Pin DIN
-  MIDI.read(midiChannel);
+  for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && MIDI.read(midiChannel); i++)
+    ;
   if (loopCount++ > 9)
   {
     checkUSBHostStatus();
