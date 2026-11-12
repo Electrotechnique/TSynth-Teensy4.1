@@ -146,6 +146,7 @@ public:
                                        effectMix(0.0)
     {
         _params.keytrackingAmount = 0.5; //Half - MIDI CC & settings option
+        _params.filterOctave = 4.0f;
         _params.mixerLevel = 0.0;
         _params.prevNote = 48;
         _params.glideSpeed = 0.0;
@@ -622,6 +623,10 @@ public:
         }
 
         VG_FOR_EACH_OSC(filter_.octaveControl(filterOctave))
+
+        // Key tracking depends on the octave range, keep held notes in step
+        _params.filterOctave = filterOctave;
+        VG_FOR_EACH_VOICE(voices[i]->updateKeytracking(_params))
     }
 
     void setResonance(float value)
@@ -722,7 +727,8 @@ public:
     {
         // TODO: Move this out of params to avoid setting it directly without updating the mixer.
         _params.keytrackingAmount = value;
-        setFilterModMixer(2, value);
+        setFilterModMixer(2, 1.0f); // The amount is applied in the per-voice DC level, not here as well
+        VG_FOR_EACH_VOICE(voices[i]->updateKeytracking(_params))
     }
 
     void setFilterLfoRetrig(bool value)

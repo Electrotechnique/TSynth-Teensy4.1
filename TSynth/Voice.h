@@ -9,8 +9,12 @@
 #include "Velocity.h"
 
 // TODO: Store / update these in the VoiceGroup instead of re-initializing for each noteOn.
+// Key tracking pivots around this note: higher notes open the filter, lower notes close it
+#define KEYTRACK_REF_NOTE 60
+
 struct VoiceParams {
-    float keytrackingAmount;
+    float keytrackingAmount; // 1.0 = cutoff moves one octave per octave played
+    float filterOctave;      // Octave range of the filter control input, set with the cutoff
     float mixerLevel;
     int prevNote;
     float glideSpeed;
@@ -35,7 +39,6 @@ class Voice {
         // Note-on held back while a stolen voice fades out (see noteOn / service)
         bool _pending = false;
         float _pendingGain = 0;
-        float _pendingKeytracking = 0;
         bool _pendingGlide = false;
         float _pendingGlideFrom = 0;
         float _pendingGlideTime = 0;
@@ -45,7 +48,7 @@ class Voice {
         // Set the new note's level, key tracking, glide and pitch
         void applyNoteOn() {
             Patch& osc = this->patch();
-            osc.keytracking_.amplitude(_pendingKeytracking);
+            this->updateKeytracking(*_pendingParams);
             mixer->gain(_pendingGain);
             if (_pendingGlide) {
                 osc.glide_.amplitude(_pendingGlideFrom);    //Set glide to previous note frequency (limited to 1 octave max)
@@ -99,6 +102,19 @@ class Voice {
             return this->_oscillator;
         }
 
+        // The filter cutoff is fc * 2^(control * filterOctave), so a control of
+        // semitones / (12 * filterOctave) moves it by exactly that many semitones.
+        void updateKeytracking(VoiceParams &params) {
+            if (_pending)
+                return; // Old note still fading out, applied when the new note starts
+            float control = 0.0f;
+            if (params.filterOctave > 0.0f)
+                control = ((int)this->_note - KEYTRACK_REF_NOTE) * params.keytrackingAmount / (12.0f * params.filterOctave);
+            if (control > 1.0f) control = 1.0f;
+            else if (control < -1.0f) control = -1.0f;
+            this->patch().keytracking_.amplitude(control);
+        }
+
         // True while the voice is audible (including its release tail)
         inline bool sounding() {
             return this->_oscillator.ampEnvelope_.isActive();
@@ -126,7 +142,6 @@ class Voice {
             bool stealing = osc.ampEnvelope_.isActive();
 
             // Work out the new note's settings now, glide depends on the previous note
-            _pendingKeytracking = note * DIV127 * params.keytrackingAmount;
             _pendingGain = VELOCITY[velocitySens][velocity] * params.mixerLevel;
             _pendingGlide = params.glideSpeed > 0 && note != params.prevNote;
             _pendingGlideFrom = (params.prevNote - note) * DIV24;
