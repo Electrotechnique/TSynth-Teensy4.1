@@ -409,7 +409,36 @@ FLASHMEM void enableScope(boolean enable) {
 
 // Send the frame buffer to the display using DMA so the CPU is free during the
 // SPI transfer. Falls back to a blocking update if DMA can't be started.
+// Period in samples of the lowest held note's audible oscillator, 0 if no notes are held.
+// Locks the scope timebase to the waveform.
+float scopePeriodSamples()
+{
+  VoiceGroup *g = groupvec[activeGroupIndex];
+  int lowest = 128;
+  for (uint8_t i = 0; i < g->size(); i++)
+  {
+    Voice *v = (*g)[i];
+    if (v->on() && v->note() < lowest)
+      lowest = v->note();
+  }
+  if (lowest > 127)
+    return 0.0f;
+  VoiceParams &p = g->params();
+  int noteA = lowest + p.oscPitchA;
+  int noteB = lowest + p.oscPitchB;
+  float freq = 0.0f;
+  if (g->getOscLevelA() > 0.01f && noteA >= 0 && noteA < 128)
+    freq = NOTEFREQS[noteA];
+  if (g->getOscLevelB() > 0.01f && noteB >= 0 && noteB < 128 && (freq == 0.0f || NOTEFREQS[noteB] < freq))
+    freq = NOTEFREQS[noteB];
+  if (freq == 0.0f)
+    freq = NOTEFREQS[lowest];
+  return AUDIO_SAMPLE_RATE_EXACT / freq;
+}
+
 void updateScreenDMA() {
+  global.scope.setPeriod(scopePeriodSamples());
+  global.scope.Display(); // Draws only if the scope is enabled
   if (tft.updateScreenAsync(false)) {
     while (tft.asyncUpdateActive()) threads.yield();
   } else {

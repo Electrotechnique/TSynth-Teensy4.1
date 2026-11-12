@@ -211,7 +211,8 @@ struct Global {
         {effectMixerR[0], 0, effectMixerRM, 0},
         {effectMixerR[1], 0, effectMixerRM, 1},
         {effectMixerR[2], 0, effectMixerRM, 2},
-        {effectMixerLM, 0, scope, 0},
+        // Scope taps the voices before the effects (DC removed, before volume) for a clean trace
+        {SharedAudio[0].dcOffsetFilter, 2, scope, 0},
         {effectMixerLM, 0, peak, 0},
         {effectMixerRM, 0, usbAudio, 1},
         {effectMixerRM, 0, i2s, 1},
