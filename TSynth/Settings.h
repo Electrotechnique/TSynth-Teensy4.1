@@ -197,6 +197,7 @@ FLASHMEM void settingsPickupEnable(int index, const char * value) {
     pickUp = false;
   } else {
     pickUp =  true;
+    pickupRearmAll();
   }
   storePickupEnable(pickUp ? 1 : 0);
 }

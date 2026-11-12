@@ -876,8 +876,16 @@ void myPitchBend(byte channel, int bend)
   groupvec[activeGroupIndex]->pitchBend(bend * 0.5f * pitchBendRange * DIV12 * DIV8192);
 }
 
+#include "PickUp.h"
+
 void myControlChange(byte channel, byte control, byte value)
 {
+  if (!controlFromPanel)
+  {
+    // Changed by MIDI: the knob no longer matches, so it has to pick up again. MIDI is never gated.
+    pickupRearmCC(control);
+    pickupDirection = 0;
+  }
   switch (control)
   {
   case CCvolume:
@@ -951,32 +959,20 @@ void myControlChange(byte channel, byte control, byte value)
     break;
 
   case CCfilterfreq:
-    // Pick up
-    if (!pickUpActive && pickUp && (filterfreqPrevValue < FILTERFREQS256[(value - TOLERANCE) * 2] || filterfreqPrevValue > FILTERFREQS256[(value - TOLERANCE) * 2]))
-      return; // PICK-UP
 
     // MIDI is 7 bit, 128 values and needs to choose alternate filterfreqs(8 bit) by multiplying by 2
     updateFilterFreq(FILTERFREQS256[value * 2]);
-    filterfreqPrevValue = FILTERFREQS256[value * 2]; // PICK-UP
     break;
 
   case CCfilterres:
-    // Pick up
-    if (!pickUpActive && pickUp && (resonancePrevValue < ((14.29f * POWER[value - TOLERANCE]) + 0.71f) || resonancePrevValue > ((14.29f * POWER[value + TOLERANCE]) + 0.71f)))
-      return; // PICK-UP
 
     // If <1.1 there is noise at high cutoff freq
     updateFilterRes((14.29f * POWER[value]) + 0.71f);
-    resonancePrevValue = (14.29f * POWER[value]) + 0.71f; // PICK-UP
     break;
 
   case CCfiltermixer:
-    // Pick up
-    if (!pickUpActive && pickUp && (filterMixPrevValue < LINEAR_FILTERMIXER[value - TOLERANCE] || filterMixPrevValue > LINEAR_FILTERMIXER[value + TOLERANCE]))
-      return; // PICK-UP
 
     updateFilterMixer(LINEAR_FILTERMIXER[value]);
-    filterMixPrevValue = LINEAR_FILTERMIXER[value]; // PICK-UP
     break;
 
   case CCfilterenv:
@@ -993,19 +989,12 @@ void myControlChange(byte channel, byte control, byte value)
     break;
 
   case CCosclfoamt:
-    // Pick up
-    if (!pickUpActive && pickUp && (oscLfoAmtPrevValue < POWER[value - TOLERANCE] || oscLfoAmtPrevValue > POWER[value + TOLERANCE]))
-      return; // PICK-UP
 
     updatePitchLFOAmt(POWER[value]);
-    oscLfoAmtPrevValue = POWER[value]; // PICK-UP
     break;
 
   case CCoscLfoRate:
   {
-    // Pick up
-    if (!pickUpActive && pickUp && (oscLfoRatePrevValue < LFOMAXRATE * POWER[value - TOLERANCE] || oscLfoRatePrevValue > LFOMAXRATE * POWER[value + TOLERANCE]))
-      return; // PICK-UP
 
     float rate = 0.0;
     if (groupvec[activeGroupIndex]->getPitchLfoMidiClockSync())
@@ -1020,7 +1009,6 @@ void myControlChange(byte channel, byte control, byte value)
       rate = LFOMAXRATE * POWER[value];
     }
     updatePitchLFORate(rate);
-    oscLfoRatePrevValue = rate; // PICK-UP
     break;
   }
 
@@ -1038,9 +1026,6 @@ void myControlChange(byte channel, byte control, byte value)
 
   case CCfilterlforate:
   {
-    // Pick up
-    if (!pickUpActive && pickUp && (filterLfoRatePrevValue < LFOMAXRATE * POWER[value - TOLERANCE] || filterLfoRatePrevValue > LFOMAXRATE * POWER[value + TOLERANCE]))
-      return; // PICK-UP
 
     float rate;
     String timeDivStr = "";
@@ -1056,17 +1041,12 @@ void myControlChange(byte channel, byte control, byte value)
     }
 
     updateFilterLfoRate(rate, timeDivStr);
-    filterLfoRatePrevValue = rate; // PICK-UP
     break;
   }
 
   case CCfilterlfoamt:
-    // Pick up
-    if (!pickUpActive && pickUp && (filterLfoAmtPrevValue < LINEAR[value - TOLERANCE] * FILTERMODMIXERMAX || filterLfoAmtPrevValue > LINEAR[value + TOLERANCE] * FILTERMODMIXERMAX))
-      return; // PICK-UP
 
     updateFilterLfoAmt(LINEAR[value] * FILTERMODMIXERMAX);
-    filterLfoAmtPrevValue = LINEAR[value] * FILTERMODMIXERMAX; // PICK-UP
     break;
 
   case CCfilterlfowaveform:
@@ -1119,19 +1099,11 @@ void myControlChange(byte channel, byte control, byte value)
     break;
 
   case CCfxamt:
-    // Pick up
-    if (!pickUpActive && pickUp && (fxAmtPrevValue < ENSEMBLE_LFO[value - TOLERANCE] || fxAmtPrevValue > ENSEMBLE_LFO[value + TOLERANCE]))
-      return; // PICK-UP
     updateEffectAmt(ENSEMBLE_LFO[value]);
-    fxAmtPrevValue = ENSEMBLE_LFO[value]; // PICK-UP
     break;
 
   case CCfxmix:
-    // Pick up
-    if (!pickUpActive && pickUp && (fxMixPrevValue < LINEAR[value - TOLERANCE] || fxMixPrevValue > LINEAR[value + TOLERANCE]))
-      return; // PICK-UP
     updateEffectMix(LINEAR[value]);
-    fxMixPrevValue = LINEAR[value]; // PICK-UP
     break;
 
   case CCallnotesoff:
@@ -1228,25 +1200,18 @@ FLASHMEM void setCurrentPatchData(String data[])
   updatePWB(data[21].toFloat(), data[18].toFloat());
   updatePWMRate(data[19].toFloat());
   updateFilterRes(data[22].toFloat());
-  resonancePrevValue = data[22].toFloat(); // Pick-up
   updateFilterFreq(data[23].toFloat());
-  filterfreqPrevValue = data[23].toInt(); // Pick-up
   updateFilterMixer(data[24].toFloat());
-  filterMixPrevValue = data[24].toFloat(); // Pick-up
   updateFilterEnv(data[25].toFloat());
   updatePitchLFOAmt(data[26].toFloat());
-  oscLfoAmtPrevValue = data[26].toFloat(); // PICK-UP
   updatePitchLFORate(data[27].toFloat());
-  oscLfoRatePrevValue = data[27].toFloat(); // PICK-UP
   updatePitchLFOWaveform(data[28].toInt());
   updatePitchLFORetrig(data[29].toInt() > 0);
   updatePitchLFOMidiClkSync(data[30].toInt() > 0); // MIDI CC Only
   updateFilterLfoRate(data[31].toFloat(), "");
-  filterLfoRatePrevValue = data[31].toFloat(); // PICK-UP
   updateFilterLFORetrig(data[32].toInt() > 0);
   updateFilterLFOMidiClkSync(data[33].toInt() > 0);
   updateFilterLfoAmt(data[34].toFloat());
-  filterLfoAmtPrevValue = data[34].toFloat(); // PICK-UP
   updateFilterLFOWaveform(data[35].toFloat());
   updateFilterAttack(data[36].toFloat());
   updateFilterDecay(data[37].toFloat());
@@ -1257,12 +1222,11 @@ FLASHMEM void setCurrentPatchData(String data[])
   updateSustain(data[42].toFloat());
   updateRelease(data[43].toFloat());
   updateEffectAmt(data[44].toFloat());
-  fxAmtPrevValue = data[44].toFloat(); // PICK-UP
   updateEffectMix(data[45].toFloat());
-  fxMixPrevValue = data[45].toFloat(); // PICK-UP
   updatePitchEnv(data[46].toFloat());
   velocitySens = data[47].toFloat();
   groupvec[activeGroupIndex]->setMonophonic(data[49].toInt());
+  pickupRearmAll(); // Knobs pick up the recalled values
   //  SPARE1 = data[50].toFloat();
   //  SPARE2 = data[51].toFloat();
 
@@ -1286,6 +1250,9 @@ void checkMux()
   {
     mux1ValuesPrev[muxInput] = mux1Read;
     mux1Read = (mux1Read >> 5); // Change range to 0-127
+    if (pickupCheck(PU_KNOB(0, muxInput), mux1Read))
+    {
+    controlFromPanel = true;
     switch (muxInput)
     {
     case MUX1_noiseLevel:
@@ -1355,13 +1322,18 @@ void checkMux()
       myControlChange(midiChannel, CCpitchenv, mux1Read);
       break;
     }
+    controlFromPanel = false;
+    }
   }
   mux2Read = adc->adc1->analogRead(MUX2_S);
   if (mux2Read > (mux2ValuesPrev[muxInput] + QUANTISE_FACTOR) || mux2Read < (mux2ValuesPrev[muxInput] - QUANTISE_FACTOR))
   {
     mux2ValuesPrev[muxInput] = mux2Read;
-    if (muxInput != MUX2_cutoff)
-      mux2Read = (mux2Read >> 5); // Change range to 0-127
+    // Change range to 0-127, except Filter Cutoff which is 8 bit, 256 values for smoother changes
+    mux2Read = muxInput == MUX2_cutoff ? (mux2Read >> 4) : (mux2Read >> 5);
+    if (pickupCheck(PU_KNOB(1, muxInput), mux2Read))
+    {
+    controlFromPanel = true;
     switch (muxInput)
     {
     case MUX2_attack:
@@ -1417,13 +1389,7 @@ void checkMux()
       myControlChange(midiChannel, CCfilterres, mux2Read);
       break;
     case MUX2_cutoff:
-      // Special case - Filter Cutoff is 8 bit, 256 values for smoother changes
-      mux2Read = (mux2Read >> 4);
-      if (!pickUpActive && pickUp && (filterfreqPrevValue < FILTERFREQS256[mux2Read - TOLERANCE] || filterfreqPrevValue > FILTERFREQS256[mux2Read + TOLERANCE]))
-        return; // PICK-UP
-
       updateFilterFreq(FILTERFREQS256[mux2Read]);
-      filterfreqPrevValue = FILTERFREQS256[mux2Read]; // PICK-UP
       midiCCOut(CCfilterfreq, mux2Read >> 1);
       break;
     case MUX2_filterLFORate:
@@ -1434,6 +1400,8 @@ void checkMux()
       midiCCOut(CCfilterlfowaveform, mux2Read);
       myControlChange(midiChannel, CCfilterlfowaveform, mux2Read);
       break;
+    }
+    controlFromPanel = false;
     }
   }
   muxInput++;
@@ -1702,6 +1670,7 @@ FLASHMEM void reinitialiseToPanel()
     mux2ValuesPrev[i] = RE_READ;
   }
   volumePrevious = RE_READ;
+  pickupReleaseAll(); // Every knob sets its parameter
   patchName = INITPATCHNAME;
   showPatchPage(F("Initial"), F("Panel Settings"));
 }

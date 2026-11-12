@@ -214,7 +214,14 @@ FLASHMEM void renderCurrentParameterPage() {
       tft.println(currentValue);
       if (pickUpActive) {
         tft.fillCircle(150, 70, 5, ST77XX_DARKGREY);
-        tft.drawFastHLine(146, 70, 4, ST7735_WHITE);
+        // Knob waiting to pick up: small arrow inside the indicator showing which way to turn
+        if (pickupDirection > 0) {
+          tft.fillTriangle(147, 72, 153, 72, 150, 67, ST7735_WHITE);
+        } else if (pickupDirection < 0) {
+          tft.fillTriangle(147, 68, 153, 68, 150, 73, ST7735_WHITE);
+        } else {
+          tft.drawFastHLine(146, 70, 4, ST7735_WHITE);
+        }
       }
       switch (paramType) {
         case PULSE:
