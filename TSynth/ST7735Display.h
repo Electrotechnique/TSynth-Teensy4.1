@@ -8,6 +8,7 @@
 #define rst 9
 #define DISPLAYTIMEOUT 700
 #define DISPLAY_FRAME_MS 30      // Minimum time between screen refreshes (~33fps max)
+#define DISPLAY_THREAD_STACK 4096 // bytes; the TeensyThreads default of 1024 is tight for the render code
 #define DISPLAY_THREAD_TICKS 1   // Display thread time slice in 1ms ticks. Main loop (MIDI) waits at most this long
 
 #include <Adafruit_GFX.h>
@@ -354,6 +355,7 @@ FLASHMEM void renderRecallPage()
 }
 
 FLASHMEM void showRenamingPage(String newName) {
+  LockGuard lock(displayLock);
   newPatchName = newName;
 }
 
@@ -380,6 +382,7 @@ FLASHMEM void renderSettingsPage() {
 }
 
 FLASHMEM void showCurrentParameterPage(String param, int pType, float val) {
+  LockGuard lock(displayLock);
   currentParameter = param;
   currentValue = String(val);
   currentFloatValue = val;
@@ -388,6 +391,7 @@ FLASHMEM void showCurrentParameterPage(String param, int pType, float val) {
 }
 
 FLASHMEM void showCurrentParameterPage(String param, String val, int pType) {
+  LockGuard lock(displayLock);
   if (state == SETTINGS || state == SETTINGSVALUE)state = PARAMETER;//Exit settings page if showing
   currentParameter = param;
   currentValue = val;
@@ -400,11 +404,13 @@ FLASHMEM void showCurrentParameterPage(String param, String val) {
 }
 
 FLASHMEM void showPatchPage(String number, String patchName) {
+  LockGuard lock(displayLock);
   currentPgmNum = number;
   currentPatchName = patchName;
 }
 
 FLASHMEM void showSettingsPage(const char *  option, const char * value, int settingsPart) {
+  LockGuard lock(displayLock);
   currentSettingsOption = option;
   currentSettingsValue = value;
   currentSettingsPart = settingsPart;
@@ -458,6 +464,10 @@ void displayThread() {
   elapsedMillis frameTime;
   while (1) {
     frameTime = 0;
+    bool reinitPause = false;
+    // Render into the frame buffer while holding the lock, so the main loop can't change
+    // the Strings and patch list being drawn. The SPI transfer below runs without it.
+    displayLock.lock();
     switch (state) {
       case PARAMETER:
         if ((millis() - timer) > DISPLAYTIMEOUT) {
@@ -476,9 +486,7 @@ void displayThread() {
         break;
       case REINITIALISE:
         renderReinitialisePage();
-        updateScreenDMA(); //update before delay
-        threads.delay(1000);
-        state = PARAMETER;
+        reinitPause = true; // Shown for a second, below
         break;
       case PATCHNAMING:
         renderPatchNamingPage();
@@ -497,7 +505,12 @@ void displayThread() {
         renderSettingsPage();
         break;
     }
+    displayLock.unlock();
     updateScreenDMA();
+    if (reinitPause) {
+      threads.delay(1000);
+      state = PARAMETER;
+    }
     // Yield the CPU back to the main loop (MIDI handling) for the rest of the frame
     if (frameTime < DISPLAY_FRAME_MS) threads.delay(DISPLAY_FRAME_MS - frameTime);
   }
@@ -511,7 +524,7 @@ void setupDisplay() {
   tft.invertDisplay(true);
   renderBootUpPage();
   tft.updateScreen();
-  int displayThreadId = threads.addThread(displayThread);
+  int displayThreadId = threads.addThread(displayThread, 0, DISPLAY_THREAD_STACK);
   // Default slice is 10ms, which could hold off MIDI note handling by up to 10ms
   if (displayThreadId > 0) threads.setTimeSlice(displayThreadId, DISPLAY_THREAD_TICKS);
 }

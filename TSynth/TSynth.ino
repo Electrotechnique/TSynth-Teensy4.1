@@ -52,6 +52,7 @@
 #include <MIDI.h>
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
+#include "ThreadSafety.h"
 #include "MidiCC.h"
 #include "SettingsService.h"
 #include "AudioPatching.h"
@@ -1160,6 +1161,7 @@ void myMIDIClock()
 
 FLASHMEM void recallPatch(int patchNo)
 {
+  LockGuard lock(displayLock); // Don't render a half loaded patch
   groupvec[activeGroupIndex]->allNotesOff();
   groupvec[activeGroupIndex]->closeEnvelopes();
   File patchFile = SD.open(String(patchNo).c_str());
@@ -1491,6 +1493,7 @@ void checkSwitches()
     case PARAMETER:
       if (patches.size() < PATCHES_LIMIT)
       {
+        LockGuard lock(displayLock); // The display renders from the patch list
         resetPatchesOrdering(); // Reset order of patches from first patch
         patches.push({patches.size() + 1, INITPATCHNAME});
         state = SAVE;
@@ -1633,6 +1636,7 @@ void checkSwitches()
       // Don't delete final patch
       if (patches.size() > 1)
       {
+        LockGuard lock(displayLock);          // The display renders from the patch list
         state = DELETEMSG;
         patchNo = patches.first().patchNo;    // PatchNo to delete from SD card
         patches.shift();                      // Remove patch from circular buffer
@@ -1675,6 +1679,36 @@ FLASHMEM void reinitialiseToPanel()
   showPatchPage(F("Initial"), F("Panel Settings"));
 }
 
+// Turning the encoder on the patch page only selects and shows the patch. It is recalled
+// once the encoder has been still for PATCH_RECALL_DELAY_MS, rather than on every detent:
+// each recall reads the SD card and sets every parameter, which a fast turn used to do
+// dozens of times a second.
+#define PATCH_RECALL_DELAY_MS 150
+boolean patchRecallPending = false;
+elapsedMillis patchRecallTimer;
+
+void selectPatchForRecall()
+{
+  patchNo = patches.first().patchNo;
+  showPatchPage(String(patchNo), patches.first().patchName);
+  state = PATCH;
+  patchRecallPending = true;
+  patchRecallTimer = 0;
+}
+
+void checkPendingPatchRecall()
+{
+  if (!patchRecallPending || patchRecallTimer < PATCH_RECALL_DELAY_MS)
+    return;
+  patchRecallPending = false;
+  recallPatch(patchNo);
+  if (state == PATCH)
+    state = PARAMETER;
+  // Make sure the current setting value is refreshed.
+  settings::increment_setting();
+  settings::decrement_setting();
+}
+
 void checkEncoder()
 {
   // Encoder works with relative inc and dec values
@@ -1682,17 +1716,13 @@ void checkEncoder()
   long encRead = encoder.read();
   if ((encCW && encRead > encPrevious + 3) || (!encCW && encRead < encPrevious - 3))
   {
+    LockGuard lock(displayLock); // The display renders from the patch list
     switch (state)
     {
     case PARAMETER:
-      state = PATCH;
+    case PATCH: // Still turning, recall not done yet
       patches.push(patches.shift());
-      patchNo = patches.first().patchNo;
-      recallPatch(patchNo);
-      state = PARAMETER;
-      // Make sure the current setting value is refreshed.
-      settings::increment_setting();
-      settings::decrement_setting();
+      selectPatchForRecall();
       break;
     case RECALL:
       patches.push(patches.shift());
@@ -1722,17 +1752,13 @@ void checkEncoder()
   }
   else if ((encCW && encRead < encPrevious - 3) || (!encCW && encRead > encPrevious + 3))
   {
+    LockGuard lock(displayLock); // The display renders from the patch list
     switch (state)
     {
     case PARAMETER:
-      state = PATCH;
+    case PATCH: // Still turning, recall not done yet
       patches.unshift(patches.pop());
-      patchNo = patches.first().patchNo;
-      recallPatch(patchNo);
-      state = PARAMETER;
-      // Make sure the current setting value is refreshed.
-      settings::increment_setting();
-      settings::decrement_setting();
+      selectPatchForRecall();
       break;
     case RECALL:
       patches.unshift(patches.pop());
@@ -1830,6 +1856,7 @@ void loop()
     checkMux();
     checkSwitches();
     checkEncoder();
+    checkPendingPatchRecall();
     // CPUMonitor();
     loopCount = 0;
   }
