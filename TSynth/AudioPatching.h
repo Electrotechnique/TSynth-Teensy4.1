@@ -247,6 +247,7 @@ struct Global {
             //This removes dc offset (mostly from unison pulse waves) before the ensemble effect
             SharedAudio[i].dcOffsetFilter.octaveControl(1.0f);
             SharedAudio[i].dcOffsetFilter.frequency(12.0f);//Lower values will give clicks on note on/off
+            SharedAudio[i].dcOffsetFilter.softClip(false); // Keep the main signal path linear
         }
 
         constant1Dc.amplitude(1.0);

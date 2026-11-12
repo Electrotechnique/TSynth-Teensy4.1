@@ -32,6 +32,28 @@ class Voice {
         uint8_t _noteId;
         Mixer* mixer = nullptr;
 
+        // Note-on held back while a stolen voice fades out (see noteOn / service)
+        bool _pending = false;
+        float _pendingGain = 0;
+        float _pendingKeytracking = 0;
+        bool _pendingGlide = false;
+        float _pendingGlideFrom = 0;
+        float _pendingGlideTime = 0;
+        uint8_t _pendingNotesOn = 0;
+        VoiceParams *_pendingParams = nullptr;
+
+        // Set the new note's level, key tracking, glide and pitch
+        void applyNoteOn() {
+            Patch& osc = this->patch();
+            osc.keytracking_.amplitude(_pendingKeytracking);
+            mixer->gain(_pendingGain);
+            if (_pendingGlide) {
+                osc.glide_.amplitude(_pendingGlideFrom);    //Set glide to previous note frequency (limited to 1 octave max)
+                osc.glide_.amplitude(0, _pendingGlideTime); //Glide to current note
+            }
+            this->updateVoice(*_pendingParams, _pendingNotesOn);
+        }
+
     public:
         Voice(Patch& p, uint8_t i): _oscillator(p), _timeOn(-1), _note(0), _velocity(0), _voiceOn(false), _idx(i), _noteId(0) {
             p.waveformMod_a.frequencyModulation(PITCHLFOOCTAVERANGE);
@@ -77,6 +99,11 @@ class Voice {
             return this->_oscillator;
         }
 
+        // True while the voice is audible (including its release tail)
+        inline bool sounding() {
+            return this->_oscillator.ampEnvelope_.isActive();
+        }
+
         void updateVoice(VoiceParams &params, uint8_t notesOn) {
             Patch& osc = this->patch();
 
@@ -96,15 +123,16 @@ class Voice {
 
         void noteOn(uint8_t note, int velocity, VoiceParams &params, uint8_t notesOn, uint8_t id) {
             Patch& osc = this->patch();
+            bool stealing = osc.ampEnvelope_.isActive();
 
-            osc.keytracking_.amplitude(note * DIV127 * params.keytrackingAmount);
-            mixer->gain(VELOCITY[velocitySens][velocity] * params.mixerLevel);
-            osc.filterEnvelope_.noteOn();
-            osc.ampEnvelope_.noteOn();
-            if (params.glideSpeed > 0 && note != params.prevNote) {
-                osc.glide_.amplitude((params.prevNote - note) * DIV24);   //Set glide to previous note frequency (limited to 1 octave max)
-                osc.glide_.amplitude(0, params.glideSpeed * GLIDEFACTOR); //Glide to current note
-            }
+            // Work out the new note's settings now, glide depends on the previous note
+            _pendingKeytracking = note * DIV127 * params.keytrackingAmount;
+            _pendingGain = VELOCITY[velocitySens][velocity] * params.mixerLevel;
+            _pendingGlide = params.glideSpeed > 0 && note != params.prevNote;
+            _pendingGlideFrom = (params.prevNote - note) * DIV24;
+            _pendingGlideTime = params.glideSpeed * GLIDEFACTOR;
+            _pendingParams = &params;
+            _pendingNotesOn = notesOn;
 
             this->_noteId = id;
             this->_voiceOn = true;
@@ -112,10 +140,36 @@ class Voice {
             this->_velocity = velocity;
             this->_timeOn = millis();
 
-            this->updateVoice(params, notesOn);
+            if (stealing) {
+                // The envelopes fade the old note out first (5ms forced release). Changing
+                // the level and pitch now would be heard on that fade as a click/blip, so
+                // wait until it has finished: service() then applies them and starts the envelopes.
+                _pending = true;
+                osc.filterEnvelope_.noteOnDeferred();
+                osc.ampEnvelope_.noteOnDeferred();
+                return;
+            }
+
+            _pending = false;
+            applyNoteOn();
+            osc.filterEnvelope_.noteOn();
+            osc.ampEnvelope_.noteOn();
+        }
+
+        // Call regularly from the main loop. Starts a deferred note-on once the old note has faded out.
+        void service() {
+            if (!_pending || !this->patch().ampEnvelope_.isWaiting())
+                return;
+            AudioNoInterrupts();
+            _pending = false;
+            applyNoteOn();
+            this->patch().filterEnvelope_.start();
+            this->patch().ampEnvelope_.start();
+            AudioInterrupts();
         }
 
         void noteOff() {
+            _pending = false;
             if (!this->_voiceOn) return;
             this->_voiceOn = false;
             this->_noteId = 0;

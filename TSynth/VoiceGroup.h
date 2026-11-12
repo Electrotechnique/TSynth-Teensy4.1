@@ -66,6 +66,7 @@ private:
     float oscLevelA;
     float oscLevelB;
     float waveformLevels[4] = {1.0f, 1.0f, 1.0f, 0.0f}; // Requested waveform mixer levels (before headroom scaling)
+    float noiseContribution = 0.0f;                      // Noise level feeding waveform mixer channel 2
     float oscMixCompensation = 1.0f;                     // Restores loudness lost to headroom scaling, applied after the filter
     float cutoff;
     float resonance;
@@ -456,19 +457,33 @@ public:
     void setWaveformMixerLevel(int channel, float level)
     {
         waveformLevels[channel] = level;
-        if (channel == 2)
-        {
-            VG_FOR_EACH_OSC(waveformMixer_.gain(2, level))
-            return;
-        }
-        // Scale the oscillator channels together so their sum can't clip the mixer
-        float sum = waveformLevels[0] + waveformLevels[1] + waveformLevels[3];
+        applyWaveformMixerLevels();
+    }
+
+    // Scale the oscillator and noise channels together so their sum can't clip the mixer
+    void applyWaveformMixerLevels()
+    {
+        float sum = waveformLevels[0] + waveformLevels[1] + waveformLevels[3] + waveformLevels[2] * noiseContribution;
         float scale = sum > OSCMIX_MAX_SUM ? OSCMIX_MAX_SUM / sum : 1.0f;
-        // Uncorrelated oscillators add by power, so compensate by sqrt to keep perceived level
+        // Uncorrelated sources add by power, so compensate by sqrt to keep perceived level
         oscMixCompensation = 1.0f / sqrtf(scale);
         VG_FOR_EACH_OSC(waveformMixer_.gain(0, waveformLevels[0] * scale))
         VG_FOR_EACH_OSC(waveformMixer_.gain(1, waveformLevels[1] * scale))
+        VG_FOR_EACH_OSC(waveformMixer_.gain(2, waveformLevels[2] * scale))
         VG_FOR_EACH_OSC(waveformMixer_.gain(3, waveformLevels[3] * scale))
+    }
+
+    void updateNoiseContribution(float gain)
+    {
+        noiseContribution = (pinkLevel + whiteLevel) * gain;
+        applyWaveformMixerLevels();
+    }
+
+    // Call regularly from the main loop: starts note-ons deferred for stolen voices
+    void serviceVoices()
+    {
+        for (uint8_t i = 0; i < voices.size(); i++)
+            voices[i]->service();
     }
 
     void setOscModMixerA(int channel, float level)
@@ -745,6 +760,7 @@ public:
         else
             gain = UNISONNOISEMIXERLEVEL;
         shared.noiseMixer.gain(0, pinkLevel * gain);
+        updateNoiseContribution(gain);
     }
 
     void setWhiteNoiseLevel(float value)
@@ -756,6 +772,7 @@ public:
         else
             gain = UNISONNOISEMIXERLEVEL;
         shared.noiseMixer.gain(1, whiteLevel * gain);
+        updateNoiseContribution(gain);
     }
 
     void setPitchLfoRetrig(bool value)
@@ -1077,31 +1094,36 @@ private:
     }
 
     // Get the oldest free voice, of none free get the oldest active voice.
+    // Prefer a silent voice, then the oldest released voice (still in its release tail),
+    // then steal the oldest held note. Using silent voices first avoids cutting off release tails.
     Voice *getVoice()
     {
-        Voice *result = nullptr;
-
-        // Find free voice
-        for (uint8_t i = 0; i < voices.size(); i++)
+        // Mono modes retrigger the same voice rather than overlapping the previous note's release
+        if (this->monophonic)
         {
-            if (!voices[i]->on())
-            {
-                result = voices[i];
-                break;
-            }
+            for (uint8_t i = 0; i < voices.size(); i++)
+                if (!voices[i]->on())
+                    return voices[i];
         }
 
+        Voice *released = nullptr;
+        Voice *oldest = nullptr;
         for (uint8_t i = 0; i < voices.size(); i++)
         {
-            if (result == nullptr || !voices[i]->on() || result->on())
+            Voice *v = voices[i];
+            if (!v->on())
             {
-                if (result == nullptr || voices[i]->timeOn() < result->timeOn())
-                {
-                    result = voices[i];
-                }
+                if (!v->sounding())
+                    return v;
+                if (released == nullptr || v->timeOn() < released->timeOn())
+                    released = v;
+            }
+            else if (oldest == nullptr || v->timeOn() < oldest->timeOn())
+            {
+                oldest = v;
             }
         }
-        return result;
+        return released != nullptr ? released : oldest;
     }
 
     // Turn off one or more notes, return the number of notes turned off.

@@ -1853,6 +1853,8 @@ void loop()
   // MIDI 5 Pin DIN
   for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && MIDI.read(midiChannel); i++)
     ;
+  // Start note-ons that were waiting for a stolen voice to fade out
+  groupvec[activeGroupIndex]->serviceVoices();
   if (loopCount++ > 9)
   {
     checkUSBHostStatus();

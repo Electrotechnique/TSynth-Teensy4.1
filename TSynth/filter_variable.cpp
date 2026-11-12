@@ -46,6 +46,33 @@
 // no audible difference.
 //#define IMPROVE_EXPONENTIAL_ACCURACY
 
+// Internal headroom: input is scaled by 2^INPUT_SHIFT. Was 12, which let the
+// states and output sums overflow (wrap around) at high resonance with loud input.
+// 10 gives 4x headroom, enough for Q = 15 with a full scale input.
+#define INPUT_SHIFT 10
+
+#define SOFT_CLIP_KNEE 24576 // 0.75 of full scale
+
+// Linear below the knee, then a smooth curve approaching full scale with
+// matching slope at the knee, so loud resonant peaks round off instead of clipping.
+static inline int16_t softLimit16(int32_t x)
+{
+	if (x <= SOFT_CLIP_KNEE && x >= -SOFT_CLIP_KNEE)
+		return x;
+	const float range = 32767.0f - SOFT_CLIP_KNEE;
+	float u = ((x < 0 ? -x : x) - SOFT_CLIP_KNEE) / range;
+	int32_t y = SOFT_CLIP_KNEE + (int32_t)(range * u / (1.0f + u));
+	return x < 0 ? -y : y;
+}
+
+static inline int16_t hardLimit16(int32_t x)
+{
+	return x > 32767 ? 32767 : (x < -32768 ? -32768 : x);
+}
+
+// Average of the two oversampled values, scaled back to 16 bit (halved first so the sum can't overflow)
+#define FILTER_OUT(a, b) ((((a) >> 1) + ((b) >> 1)) >> INPUT_SHIFT)
+
 #if defined(__ARM_ARCH_7EM__)
 
 void AudioFilterStateVariableTS::update_fixed(const int16_t *in,
@@ -59,11 +86,12 @@ void AudioFilterStateVariableTS::update_fixed(const int16_t *in,
 
 	fmult = setting_fmult;
 	damp = setting_damp;
+	const int32_t input_gain = setting_input_gain;
 	inputprev = state_inputprev;
 	lowpass = state_lowpass;
 	bandpass = state_bandpass;
 	do {
-		input = (*in++) << 12;
+		input = ((*in++) * input_gain) >> (16 - INPUT_SHIFT);
 		lowpass = lowpass + MULT(fmult, bandpass);
 		highpass = ((input + inputprev)>>1) - lowpass - MULT(damp, bandpass);
 		inputprev = input;
@@ -74,12 +102,18 @@ void AudioFilterStateVariableTS::update_fixed(const int16_t *in,
 		lowpass = lowpass + MULT(fmult, bandpass);
 		highpass = input - lowpass - MULT(damp, bandpass);
 		bandpass = bandpass + MULT(fmult, highpass);
-		lowpasstmp = signed_saturate_rshift(lowpass+lowpasstmp, 16, 13);
-		bandpasstmp = signed_saturate_rshift(bandpass+bandpasstmp, 16, 13);
-		highpasstmp = signed_saturate_rshift(highpass+highpasstmp, 16, 13);
-		*lp++ = lowpasstmp;
-		*bp++ = bandpasstmp;
-		*hp++ = highpasstmp;
+		lowpasstmp = FILTER_OUT(lowpass, lowpasstmp);
+		bandpasstmp = FILTER_OUT(bandpass, bandpasstmp);
+		highpasstmp = FILTER_OUT(highpass, highpasstmp);
+		if (soft_clip) {
+			*lp++ = softLimit16(lowpasstmp);
+			*bp++ = softLimit16(bandpasstmp);
+			*hp++ = softLimit16(highpasstmp);
+		} else {
+			*lp++ = hardLimit16(lowpasstmp);
+			*bp++ = hardLimit16(bandpasstmp);
+			*hp++ = hardLimit16(highpasstmp);
+		}
 	} while (in < end);
 	state_inputprev = inputprev;
 	state_lowpass = lowpass;
@@ -100,6 +134,7 @@ void AudioFilterStateVariableTS::update_variable(const int16_t *in,
 	fcenter = setting_fcenter;
 	octavemult = setting_octavemult;
 	damp = setting_damp;
+	const int32_t input_gain = setting_input_gain;
 	inputprev = state_inputprev;
 	lowpass = state_lowpass;
 	bandpass = state_bandpass;
@@ -145,7 +180,7 @@ void AudioFilterStateVariableTS::update_variable(const int16_t *in,
 			multiply_32x32_rshift32_rounded(fmult, -1383276101))) << 1;
 		#endif
 		// now do the state variable filter as normal, using fmult
-		input = (*in++) << 12;
+		input = ((*in++) * input_gain) >> (16 - INPUT_SHIFT);
 		lowpass = lowpass + MULT(fmult, bandpass);
 		highpass = ((input + inputprev)>>1) - lowpass - MULT(damp, bandpass);
 		inputprev = input;
@@ -156,12 +191,18 @@ void AudioFilterStateVariableTS::update_variable(const int16_t *in,
 		lowpass = lowpass + MULT(fmult, bandpass);
 		highpass = input - lowpass - MULT(damp, bandpass);
 		bandpass = bandpass + MULT(fmult, highpass);
-		lowpasstmp = signed_saturate_rshift(lowpass+lowpasstmp, 16, 13);
-		bandpasstmp = signed_saturate_rshift(bandpass+bandpasstmp, 16, 13);
-		highpasstmp = signed_saturate_rshift(highpass+highpasstmp, 16, 13);
-		*lp++ = lowpasstmp;
-		*bp++ = bandpasstmp;
-		*hp++ = highpasstmp;
+		lowpasstmp = FILTER_OUT(lowpass, lowpasstmp);
+		bandpasstmp = FILTER_OUT(bandpass, bandpasstmp);
+		highpasstmp = FILTER_OUT(highpass, highpasstmp);
+		if (soft_clip) {
+			*lp++ = softLimit16(lowpasstmp);
+			*bp++ = softLimit16(bandpasstmp);
+			*hp++ = softLimit16(highpasstmp);
+		} else {
+			*lp++ = hardLimit16(lowpasstmp);
+			*bp++ = hardLimit16(bandpasstmp);
+			*hp++ = hardLimit16(highpasstmp);
+		}
 	} while (in < end);
 	state_inputprev = inputprev;
 	state_lowpass = lowpass;

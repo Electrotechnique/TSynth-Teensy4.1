@@ -33,6 +33,9 @@
 #include "Arduino.h"
 #include "AudioStream.h"
 
+// Input attenuation per unit of Q above 0.707 (0 = none)
+#define RESONANCE_INPUT_COMP 0.1f
+
 class AudioFilterStateVariableTS: public AudioStream
 {
 public:
@@ -59,6 +62,11 @@ public:
 		else if (q > 15.0) q = 15.0;//ElectroTechnique changed from 5.0
 		// TODO: allow lower Q when frequency is lower
 		setting_damp = (1.0 / q) * 1073741824.0;
+		// Lower the input level as resonance rises (as analog filters do), so the
+		// resonant peak isn't driven so far into the limiter. Unity at Q <= 0.707,
+		// -3dB at Q = 5, about -8dB at Q = 15.
+		float atten = 1.0f + (q > 0.707f ? (q - 0.707f) * RESONANCE_INPUT_COMP : 0.0f);
+		setting_input_gain = 65536.0f / atten;
 	}
 	void octaveControl(float n) {
 		// filter's corner frequency is Fcenter * 2^(control * N)
@@ -68,8 +76,13 @@ public:
 		else if (n > 6.9999) n = 6.9999;
 		setting_octavemult = n * 4096.0;
 	}
+	// Soft limit the outputs above 75% of full scale instead of hard clipping.
+	// On by default; turn off for utility filters that must stay linear (DC blocker).
+	void softClip(bool enable) { soft_clip = enable; }
 	virtual void update(void);
 private:
+	bool soft_clip = true;
+	int32_t setting_input_gain = 65536; // Q16
 	void update_fixed(const int16_t *in,
 		int16_t *lp, int16_t *bp, int16_t *hp);
 	void update_variable(const int16_t *in, const int16_t *ctl,
