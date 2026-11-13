@@ -452,15 +452,15 @@ float scopePeriodSamples()
 void updateScreenDMA() {
   global.scope.setPeriod(scopePeriodSamples());
   global.scope.Display(); // Draws only if the scope is enabled
-  if (tft.updateScreenAsync(false)) {
-    // A frame takes ~10ms. If it ever takes far longer the DMA has stalled, which would
-    // freeze the display; report it so it can be told apart from other causes.
+  // One DMA transfer for the whole frame (~14ms), polled. See ST7735_t3::oneShotUpdate().
+  if (tft.oneShotUpdate()) {
     elapsedMillis wait;
-    bool reported = false;
-    while (tft.asyncUpdateActive()) {
-      if (!reported && wait > 500) {
-        Serial.println(F("Display: DMA screen update stalled"));
-        reported = true;
+    while (tft.oneShotUpdateActive()) {
+      if (wait > 200) {
+        // Should never happen; recover rather than freeze the display
+        Serial.println(F("Display: DMA screen update timed out, reset"));
+        tft.oneShotUpdateAbort();
+        break;
       }
       threads.yield();
     }

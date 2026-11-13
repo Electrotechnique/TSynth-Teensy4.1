@@ -215,6 +215,14 @@ class ST7735_t3 : public Adafruit_GFX {
   uint32_t frameCount() {return _dma_frame_count; }
   boolean asyncUpdateActive(void)  {return (_dma_state & ST77XX_DMA_ACTIVE);}
   void  initDMASettings(void);
+  #if defined(__IMXRT1062__)
+  // TSynth: whole frame in one DMA transfer straight from the frame buffer, completion
+  // polled rather than counted in interrupts (see ST7735_t3.cpp). The caller must not
+  // draw into the frame buffer until oneShotUpdateActive() returns false.
+  bool  oneShotUpdate(void);         // start; false if it couldn't be started
+  bool  oneShotUpdateActive(void);   // true while sending; finishes the transfer when done
+  void  oneShotUpdateAbort(void);    // stop a transfer that never finished
+  #endif
   #else
   // added support to use optional Frame buffer
   void  setFrameBuffer(uint16_t *frame_buffer) {return;}
@@ -394,6 +402,9 @@ class ST7735_t3 : public Adafruit_GFX {
   uint16_t          _dma_buffer_size;   // the actual size we are using <= DMA_BUFFER_SIZE;
   uint16_t          _dma_cnt_sub_frames_per_frame;  
   uint32_t      _spi_fcr_save;    // save away previous FCR register value
+  DMAChannel    _oneshot_dma;     // TSynth: single transfer frame update
+  volatile bool _oneshot_active = false;
+  void          oneShotFinish(void);
 
   #elif defined(__MK64FX512__)
   // T3.5 - had issues scatter/gather so do just use channels/interrupts
