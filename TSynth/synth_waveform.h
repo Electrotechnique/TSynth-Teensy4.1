@@ -69,11 +69,18 @@ public:
   int16_t generate_sawtooth (uint32_t new_phase, int i) ;
   int16_t generate_square (uint32_t new_phase, int i) ;
   int16_t generate_pulse (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  // Whole blocks, same results as the per-sample calls (saves a call per sample)
+  void generate_sawtooth_block (const uint32_t *phases, int16_t *out, int32_t magnitude, bool reverse) ;
+  void generate_square_block (const uint32_t *phases, int16_t *out, int32_t magnitude) ;
+  void generate_pulse_block (const uint32_t *phases, const int16_t *shape, int16_t *out, int32_t magnitude) ;
   void init_sawtooth (uint32_t freq_word) ;
   void init_square (uint32_t freq_word) ;
   void init_pulse (uint32_t freq_word, uint32_t pulse_width) ;
   // Band-limited variable triangle (rising for pulse_width of the cycle)
   int16_t generate_triangle_variable (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  // A whole block: same result as calling generate_triangle_variable() per sample, but
+  // without two function calls and the state reloads on every sample
+  void generate_triangle_variable_block (const uint32_t *phases, const int16_t *shape, int16_t *out, int32_t magnitude) ;
   void init_triangle_variable (uint32_t freq_word) ;
   
 
@@ -119,6 +126,7 @@ private:
   uint32_t vt_inc ;
   void vt_insert (uint32_t dist, uint32_t dphase, float amp, int i) ;
   int16_t vt_step (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  void vt_corners (uint32_t new_phase, uint32_t pulse_width, uint32_t dphase, int i) ;
   inline float vt_ref_at (uint32_t phase) ;
   inline void vt_set_width (uint32_t w32) ;
 };
