@@ -35,6 +35,10 @@ extern "C"
 
 // TeensyThreads' Mutex isn't recursive. Display functions call each other and are called
 // from code that already holds the lock, so allow the owning thread to lock again.
+//
+// Waiting uses try_lock() and yield() only. Mutex::lock() suspends the waiting thread, but
+// if the holder unlocks between the waiter's failed try and its suspend, nothing ever
+// restarts it (lost wake-up): the display thread froze for good under heavy MIDI CC traffic.
 class RecursiveMutex
 {
 public:
@@ -46,7 +50,8 @@ public:
       depth++;
       return;
     }
-    mutex.lock();
+    while (!mutex.try_lock())
+      threads.yield(); // let the holder run and release it
     owner = id;
     depth = 1;
   }

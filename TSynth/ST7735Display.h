@@ -453,7 +453,17 @@ void updateScreenDMA() {
   global.scope.setPeriod(scopePeriodSamples());
   global.scope.Display(); // Draws only if the scope is enabled
   if (tft.updateScreenAsync(false)) {
-    while (tft.asyncUpdateActive()) threads.yield();
+    // A frame takes ~10ms. If it ever takes far longer the DMA has stalled, which would
+    // freeze the display; report it so it can be told apart from other causes.
+    elapsedMillis wait;
+    bool reported = false;
+    while (tft.asyncUpdateActive()) {
+      if (!reported && wait > 500) {
+        Serial.println(F("Display: DMA screen update stalled"));
+        reported = true;
+      }
+      threads.yield();
+    }
   } else {
     tft.updateScreen();
   }
