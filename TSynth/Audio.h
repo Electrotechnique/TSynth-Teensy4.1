@@ -68,5 +68,6 @@
 #include "synth_whitenoise.h"
 #include "synth_pinknoise.h"
 #include "Oscilloscope.h"
+#include "effect_cpuguard.h"
 #include "analyze_peak.h"
 #endif

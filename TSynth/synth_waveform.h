@@ -111,6 +111,8 @@ private:
   float vt_ref [16] ;    // plain triangle, delayed, for drift correction
   float vt_y ;           // integrator, +/-1
   float vt_w ;           // latched width
+  float vt_inv_w ;       // 1/W and 1/(1-W), worked out once per cycle
+  float vt_inv_1mw ;
   uint32_t vt_w32 ;
   bool vt_rising ;
   bool vt_sync ;         // align to the real phase on the next sample
@@ -118,6 +120,7 @@ private:
   void vt_insert (uint32_t dist, uint32_t dphase, float amp, int i) ;
   int16_t vt_step (uint32_t new_phase, uint32_t pulse_width, int i) ;
   inline float vt_ref_at (uint32_t phase) ;
+  inline void vt_set_width (uint32_t w32) ;
 };
 
 
@@ -249,6 +252,15 @@ public:
     }
     tone_offset = n * 32767.0;
   }
+  // Stop generating while the voice is silent (saves CPU); resume before the next note.
+  // Call with audio interrupts off (AudioNoInterrupts) or from the audio interrupt.
+  void suspend() { suspended = true; }
+  void resume() {
+    if (!suspended) return;
+    suspended = false;
+    begin(tone_type); // restart the band-limited waveform from its current settings
+  }
+  bool isSuspended() { return suspended; }
   void begin(short t_type) {
     tone_type = t_type;
     if (t_type == WAVEFORM_BANDLIMIT_SQUARE)
@@ -302,6 +314,7 @@ private:
   uint8_t  modulation_type;
     int16_t   syncFlag;
         BandLimitedWaveformTS band_limit_waveform ;
+        volatile bool suspended = false;
 };
 
 

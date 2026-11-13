@@ -241,6 +241,15 @@ void AudioSynthWaveformModulatedTS::update(void)
   moddata = receiveReadOnly(0);
   shapedata = receiveReadOnly(1);
 
+  if (suspended) {
+    // Voice is silent: keep the phase moving, but produce nothing (so the filter and
+    // mixers after it have nothing to process either)
+    if (moddata) release(moddata);
+    if (shapedata) release(shapedata);
+    phase_accumulator += inc * AUDIO_BLOCK_SAMPLES;
+    return;
+  }
+
   if(syncFlag==1){
     phase_accumulator = 0;
     syncFlag = 0;
@@ -791,10 +800,18 @@ void BandLimitedWaveformTS::init_pulse (uint32_t freq_word, uint32_t pulse_width
 #define TRI_DRIFT_K 0.0005f              // drift correction per sample
 #define TRI_OUT_SCALE (0.92f * 32767.0f) // a little headroom for overshoot at extreme widths
 
+inline void BandLimitedWaveformTS::vt_set_width (uint32_t w32)
+{
+  vt_w32 = w32 ;
+  vt_w = w32 * (1.0f / 4294967296.0f) ;
+  vt_inv_w = 1.0f / vt_w ;
+  vt_inv_1mw = 1.0f / (1.0f - vt_w) ;
+}
+
 inline float BandLimitedWaveformTS::vt_ref_at (uint32_t phase)
 {
   float ph = phase * (1.0f / 4294967296.0f) ;
-  return ph < vt_w ? 2.0f * ph / vt_w - 1.0f : 1.0f - 2.0f * (ph - vt_w) / (1.0f - vt_w) ;
+  return ph < vt_w ? 2.0f * ph * vt_inv_w - 1.0f : 1.0f - 2.0f * (ph - vt_w) * vt_inv_1mw ;
 }
 
 // New corner, dist into this sample's phase step of dphase. As insert_step: the part before
@@ -836,19 +853,18 @@ int16_t BandLimitedWaveformTS::vt_step (uint32_t new_phase, uint32_t pulse_width
   // Corners in this sample, in time order
   if (vt_rising && phase_word < vt_w32 && (new_phase >= vt_w32 || new_phase < phase_word))
   {
-    vt_insert (vt_w32 - phase_word, dphase, -2.0f / (1.0f - vt_w) - 2.0f / vt_w, i) ;
+    vt_insert (vt_w32 - phase_word, dphase, -2.0f * (vt_inv_1mw + vt_inv_w), i) ;
     vt_rising = false ;
   }
   if (!vt_rising && new_phase < phase_word) // start of cycle
   {
-    const float fall = 2.0f / (1.0f - vt_w) ;
-    vt_w32 = pulse_width ;
-    vt_w = pulse_width * (1.0f / 4294967296.0f) ;
-    vt_insert (- phase_word, dphase, 2.0f / vt_w + fall, i) ;
+    const float fall = 2.0f * vt_inv_1mw ;
+    vt_set_width (pulse_width) ;
+    vt_insert (- phase_word, dphase, 2.0f * vt_inv_w + fall, i) ;
     vt_rising = true ;
     if (new_phase >= vt_w32) // narrow: also past the top corner
     {
-      vt_insert (vt_w32 - phase_word, dphase, -2.0f / (1.0f - vt_w) - 2.0f / vt_w, i) ;
+      vt_insert (vt_w32 - phase_word, dphase, -2.0f * (vt_inv_1mw + vt_inv_w), i) ;
       vt_rising = false ;
     }
   }
@@ -892,8 +908,7 @@ int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, u
     vt_sync = false ;
     const uint32_t inc = vt_inc ;
     const uint32_t start = new_phase - 32 * inc ;
-    vt_w32 = pulse_width ;
-    vt_w = pulse_width * (1.0f / 4294967296.0f) ;
+    vt_set_width (pulse_width) ;
     for (int k = 0 ; k < 32 ; k++)
       vt_future [k] = 0.0f ;
     vt_fpos = 0 ;
@@ -902,12 +917,12 @@ int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, u
     for (int k = 0 ; k < 16 ; k++, p += inc)
     {
       const int idx = (i + k) & 15 ;
-      vt_cyc [idx] = p < vt_w32 ? 2.0f / vt_w : -2.0f / (1.0f - vt_w) ;
+      vt_cyc [idx] = p < vt_w32 ? 2.0f * vt_inv_w : -2.0f * vt_inv_1mw ;
       vt_dph [idx] = inc * (1.0f / 4294967296.0f) ;
       vt_ref [idx] = vt_ref_at (p) ;
     }
     vt_rising = start < vt_w32 ;
-    vt_level = vt_rising ? 2.0f / vt_w : -2.0f / (1.0f - vt_w) ;
+    vt_level = vt_rising ? 2.0f * vt_inv_w : -2.0f * vt_inv_1mw ;
     phase_word = start - inc ;
     for (int k = 0 ; k < 32 ; k++)
       vt_step (start + k * inc, pulse_width, i + k) ; // i + 32 is the same slot as i

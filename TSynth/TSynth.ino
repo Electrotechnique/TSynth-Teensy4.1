@@ -236,6 +236,9 @@ FLASHMEM void setup()
   reloadFiltEnv();
   reloadAmpEnv();
   reloadGlideShape();
+
+  // If the audio processing ever overruns, drop a voice rather than hang
+  global.cpuGuard.onOverload = []() { groupvec[activeGroupIndex]->shedVoice(); };
 }
 
 // Set while flushing MIDI input on Panic: incoming messages are read and dropped
@@ -1919,8 +1922,15 @@ void loop()
   // MIDI 5 Pin DIN
   for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && MIDI.read(midiChannel); i++)
     ;
-  // Start note-ons that were waiting for a stolen voice to fade out
+  // Start note-ons that were waiting for a stolen voice to fade out, and suspend the
+  // oscillators of voices that have stopped sounding
   groupvec[activeGroupIndex]->serviceVoices();
+  static uint32_t overloadsReported = 0;
+  if (global.cpuGuard.overloads != overloadsReported)
+  {
+    overloadsReported = global.cpuGuard.overloads;
+    Serial.println(F("Audio CPU overload: a voice was dropped"));
+  }
   if (loopCount++ > 9)
   {
     checkUSBHostStatus();

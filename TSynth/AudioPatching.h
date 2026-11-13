@@ -193,6 +193,7 @@ struct Global {
     AudioSynthNoiseWhite     white;
     AudioAnalyzePeak         peak;
     Oscilloscope             scope;
+    AudioCpuGuard            cpuGuard;
     AudioMixer4              effectMixerR[3];
     AudioMixer4              effectMixerRM;
     AudioMixer4              effectMixerL[3];
@@ -204,7 +205,7 @@ struct Global {
 
     AudioControlSGTL5000     sgtl5000_1;
 
-    AudioConnection connectionsArray[12] = {
+    AudioConnection connectionsArray[13] = {
         {effectMixerL[0], 0, effectMixerLM, 0},
         {effectMixerL[1], 0, effectMixerLM, 1},
         {effectMixerL[2], 0, effectMixerLM, 2},
@@ -217,7 +218,8 @@ struct Global {
         {effectMixerRM, 0, usbAudio, 1},
         {effectMixerRM, 0, i2s, 1},
         {effectMixerLM, 0, i2s, 0},
-        {effectMixerLM, 0, usbAudio, 0}
+        {effectMixerLM, 0, usbAudio, 0},
+        {effectMixerLM, 0, cpuGuard, 0} // only so it runs every update
     };
 
     std::vector<AudioConnection*> connections;

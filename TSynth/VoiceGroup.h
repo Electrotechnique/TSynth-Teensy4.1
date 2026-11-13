@@ -937,6 +937,30 @@ public:
         noteStack.clear();
     }
 
+    // Audio CPU overload (called from the audio interrupt): silence one voice to bring the
+    // load down - a voice still in its release tail if there is one, else the oldest held note
+    void shedVoice()
+    {
+        Voice *victim = nullptr;
+        for (uint8_t i = 0; i < voices.size(); i++)
+        {
+            Voice *v = voices[i];
+            if (!v->on() && v->sounding() && (victim == nullptr || v->timeOn() < victim->timeOn()))
+                victim = v;
+        }
+        if (victim == nullptr)
+        {
+            for (uint8_t i = 0; i < voices.size(); i++)
+            {
+                Voice *v = voices[i];
+                if (v->on() && (victim == nullptr || v->timeOn() < victim->timeOn()))
+                    victim = v;
+            }
+        }
+        if (victim != nullptr && victim->forceSilence() && this->voicesOn > 0)
+            this->voicesOn--;
+    }
+
     // Silence everything at once: notes off and envelopes closed
     void panic()
     {

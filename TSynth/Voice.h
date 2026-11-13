@@ -140,6 +140,9 @@ class Voice {
         void noteOn(uint8_t note, int velocity, VoiceParams &params, uint8_t notesOn, uint8_t id) {
             Patch& osc = this->patch();
             bool stealing = osc.ampEnvelope_.isActive();
+            // Oscillators of a silent voice are suspended to save CPU (see service())
+            osc.waveformMod_a.resume();
+            osc.waveformMod_b.resume();
 
             // Work out the new note's settings now, glide depends on the previous note
             _pendingGain = VELOCITY[velocitySens][velocity] * params.mixerLevel;
@@ -173,7 +176,18 @@ class Voice {
 
         // Call regularly from the main loop. Starts a deferred note-on once the old note has faded out.
         void service() {
-            if (!_pending || !this->patch().ampEnvelope_.isWaiting())
+            Patch& osc = this->patch();
+            // Voice finished sounding: stop its oscillators (and so its filter) until the next note
+            if (!_pending && !_voiceOn && !osc.waveformMod_a.isSuspended() && !osc.ampEnvelope_.isActive()) {
+                AudioNoInterrupts();
+                if (!_pending && !_voiceOn && !osc.ampEnvelope_.isActive()) {
+                    osc.waveformMod_a.suspend();
+                    osc.waveformMod_b.suspend();
+                }
+                AudioInterrupts();
+                return;
+            }
+            if (!_pending || !osc.ampEnvelope_.isWaiting())
                 return;
             AudioNoInterrupts();
             _pending = false;
@@ -181,6 +195,20 @@ class Voice {
             this->patch().filterEnvelope_.start();
             this->patch().ampEnvelope_.start();
             AudioInterrupts();
+        }
+
+        // Silence at once and stop the oscillators (CPU overload). Returns true if it was held.
+        bool forceSilence() {
+            Patch& osc = this->patch();
+            bool wasOn = _voiceOn;
+            _pending = false;
+            _voiceOn = false;
+            _noteId = 0;
+            osc.filterEnvelope_.close();
+            osc.ampEnvelope_.close();
+            osc.waveformMod_a.suspend();
+            osc.waveformMod_b.suspend();
+            return wasOn;
         }
 
         void noteOff() {
