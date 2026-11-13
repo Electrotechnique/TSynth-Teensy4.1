@@ -72,6 +72,9 @@ public:
   void init_sawtooth (uint32_t freq_word) ;
   void init_square (uint32_t freq_word) ;
   void init_pulse (uint32_t freq_word, uint32_t pulse_width) ;
+  // Band-limited variable triangle (rising for pulse_width of the cycle)
+  int16_t generate_triangle_variable (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  void init_triangle_variable (uint32_t freq_word) ;
   
 
 private:
@@ -94,6 +97,15 @@ private:
   int32_t  cyclic[16] ;    // circular buffer of output samples
   bool pulse_state ;
   uint32_t sampled_width ; // pulse width is sampled once per waveform
+
+  // Variable triangle: integral of a band-limited pulse. The pulse output is 16 samples
+  // late (cyclic buffer), so the per-sample slope terms and the reference triangle are
+  // delayed to match.
+  float tri_y ;           // integrator, +/-1
+  float tri_gain[16] ;    // phase step / (W (1 - W))
+  float tri_offset[16] ;  // (1 - 2W) * tri_gain
+  float tri_ref[16] ;     // plain triangle, for drift correction
+  void tri_terms (uint32_t new_phase, uint32_t dphase, int i) ;
 };
 
 
@@ -231,6 +243,8 @@ public:
       band_limit_waveform.init_square (phase_increment) ;
     else if (t_type == WAVEFORM_BANDLIMIT_PULSE)
       band_limit_waveform.init_pulse (phase_increment, 0x80000000u) ;
+    else if (t_type == WAVEFORM_TRIANGLE_VARIABLE)
+      band_limit_waveform.init_triangle_variable (phase_increment) ;
     else if (t_type == WAVEFORM_BANDLIMIT_SAWTOOTH || t_type == WAVEFORM_BANDLIMIT_SAWTOOTH_REVERSE)
       band_limit_waveform.init_sawtooth (phase_increment) ;
   }

@@ -429,24 +429,11 @@ void AudioSynthWaveformModulatedTS::update(void)
 
   case WAVEFORM_TRIANGLE_VARIABLE:
     if (shapedata) {
+      // Band-limited (the plain version aliased badly at high pitches and extreme widths)
       for (i=0; i < AUDIO_BLOCK_SAMPLES; i++) {
-        uint32_t width = (shapedata->data[i] + 0x8000) & 0xFFFF;
-        uint32_t rise = 0xFFFFFFFF / width;
-        uint32_t fall = 0xFFFFFFFF / (0xFFFF - width);
-        uint32_t halfwidth = width << 15;
-        uint32_t n;
-        ph = phasedata[i];
-        if (ph < halfwidth) {
-          n = (ph >> 16) * rise;
-          *bp++ = ((n >> 16) * magnitude) >> 16;
-        } else if (ph < 0xFFFFFFFF - halfwidth) {
-          n = 0x7FFFFFFF - (((ph - halfwidth) >> 16) * fall);
-          *bp++ = (((int32_t)n >> 16) * magnitude) >> 16;
-        } else {
-          n = ((ph + halfwidth) >> 16) * rise + 0x80000000;
-          *bp++ = (((int32_t)n >> 16) * magnitude) >> 16;
-        }
-        ph += inc;
+        uint32_t width = ((shapedata->data[i] + 0x8000) & 0xFFFF) << 16;
+        int32_t val = band_limit_waveform.generate_triangle_variable (phasedata[i], width, i) ;
+        *bp++ = (int16_t) ((val * magnitude) >> 16) ;
       }
       break;
     } // else fall through to orginary triangle without shape modulation
@@ -773,6 +760,95 @@ void BandLimitedWaveformTS::init_pulse (uint32_t freq_word, uint32_t pulse_width
     cyclic [i & 15] = (int16_t) process_active_steps_pulse (new_phase, pulse_width) ;
     phase_word = new_phase ;
   }
+}
+
+// Band-limited variable triangle.
+//
+// The slope of a triangle that rises for a fraction W of the cycle and falls for the rest
+// is a pulse wave: +2/W while rising, -2/(1-W) while falling. Integrating a band-limited
+// pulse therefore gives a band-limited triangle (equivalent to BLAMP corner correction),
+// with the same quality as the band-limited pulse, including at extreme widths where the
+// triangle becomes saw-like. A slow pull towards the plain triangle stops integrator drift
+// and keeps the level right while the width or pitch changes.
+//
+// The pulse is high for phase 0..W, so the triangle runs from -1 at phase 0 up to +1 at W.
+// That is the plain variable triangle shifted by W/2, which sounds the same.
+
+#define TRI_MIN_WIDTH 0x00400000u        // 1/1024 of the cycle, avoids dividing by zero
+#define TRI_DRIFT_K 0.002f               // drift correction per sample (~14Hz)
+#define TRI_OUT_SCALE (0.92f * 32767.0f) // a little headroom for overshoot at extreme widths
+
+// Slope terms and reference triangle for one (undelayed) sample, stored for 16 samples later
+void BandLimitedWaveformTS::tri_terms (uint32_t new_phase, uint32_t dphase, int i)
+{
+  const float W = sampled_width * (1.0f / 4294967296.0f) ;
+  const float ph = new_phase * (1.0f / 4294967296.0f) ;
+  const float g = (dphase * (1.0f / 4294967296.0f)) / (W * (1.0f - W)) ;
+  const int idx = i & 15 ;
+  tri_gain[idx] = g ;
+  tri_offset[idx] = (1.0f - 2.0f * W) * g ;
+  tri_ref[idx] = ph < W ? 2.0f * ph / W - 1.0f : 1.0f - 2.0f * (ph - W) / (1.0f - W) ;
+}
+
+int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, uint32_t pulse_width, int i)
+{
+  if (pulse_width < TRI_MIN_WIDTH)
+    pulse_width = TRI_MIN_WIDTH ;
+  else if (pulse_width > 0xFFFFFFFFu - TRI_MIN_WIDTH)
+    pulse_width = 0xFFFFFFFFu - TRI_MIN_WIDTH ;
+
+  const uint32_t dphase = new_phase - phase_word ;
+  new_step_check_pulse (new_phase, pulse_width, i) ;
+  int32_t val = process_active_steps (new_phase) ; // raw pulse, +/-BASE_AMPLITUDE
+
+  const int idx = i & 15 ;
+  // Values from 16 samples ago, matching the delayed pulse sample
+  const int32_t pulse = cyclic [idx] ;
+  const float g = tri_gain [idx], o = tri_offset [idx], ref = tri_ref [idx] ;
+  cyclic [idx] = val ;
+  tri_terms (new_phase, dphase, i) ;
+  phase_word = new_phase ;
+
+  tri_y += pulse * (1.0f / BASE_AMPLITUDE) * g + o ;
+  tri_y += TRI_DRIFT_K * (ref - tri_y) ;
+  // Limit the transient after a waveform change, when the phase jumps
+  if (tri_y > 1.5f) tri_y = 1.5f ;
+  else if (tri_y < -1.5f) tri_y = -1.5f ;
+
+  int32_t out = (int32_t) (tri_y * TRI_OUT_SCALE) ;
+  if (out > 32767) out = 32767 ;
+  else if (out < -32768) out = -32768 ;
+  return (int16_t) out ;
+}
+
+void BandLimitedWaveformTS::init_triangle_variable (uint32_t freq_word)
+{
+  // As init_pulse (50% width), but keeping the raw pulse and filling the triangle terms
+  phase_word = 0 ;
+  sampled_width = DEG180 ;
+  newptr = 0 ;
+  delptr = 0 ;
+  for (int i = 0 ; i < 2*SUPPORT ; i++)
+    phase_word -= freq_word ;
+  if (phase_word < sampled_width)
+  {
+    dc_offset = BASE_AMPLITUDE ;
+    pulse_state = true ;
+  }
+  else
+  {
+    dc_offset = -BASE_AMPLITUDE ;
+    pulse_state = false ;
+  }
+  for (int i = 0 ; i < 2*SUPPORT ; i++)
+  {
+    uint32_t new_phase = phase_word + freq_word ;
+    new_step_check_pulse (new_phase, DEG180, i) ;
+    cyclic [i & 15] = process_active_steps (new_phase) ;
+    tri_terms (new_phase, freq_word, i) ;
+    phase_word = new_phase ;
+  }
+  tri_y = tri_ref [0] ; // the first sample to come out
 }
 
 BandLimitedWaveformTS::BandLimitedWaveformTS()
