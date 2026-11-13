@@ -423,9 +423,31 @@ FLASHMEM void updateUnison(uint8_t unison)
   }
 }
 
+// Volume knob taper. The SGTL5000 headphone volume moves in 0.5dB steps, so mapping the knob
+// straight onto it (as before) was linear in dB across ~64dB: half way was 29dB down, about
+// an eighth as loud. This is an audio taper (amplitude = knob^2): half way is -12dB, about
+// half as loud, quarter way -24dB. The maximum is unchanged.
+#define VOLUME_MAX_DB 6.0f    // codec headphone gain at full volume (as with volume 0.9 before)
+#define VOLUME_TAPER_DB 40.0f // dB per decade of knob travel
+
+FLASHMEM void setOutputVolume(float vol)
+{
+  // Headphone volume register: 0x00 = +12dB ... 0x7F = -51.5dB; volume(n) writes 0x80 - n*129
+  float reg = vol > 0.0f ? (12.0f - (VOLUME_MAX_DB + VOLUME_TAPER_DB * log10f(vol))) * 2.0f : 1000.0f;
+  if (reg > 127.0f)
+  {
+    global.sgtl5000_1.volume(0.0f); // below the codec's range: mute
+    return;
+  }
+  if (reg < 0.0f)
+    reg = 0.0f;
+  int n = 128 - (int)(reg + 0.5f);
+  global.sgtl5000_1.volume(n / 129.0f);
+}
+
 FLASHMEM void updateVolume(float vol)
 {
-  global.sgtl5000_1.volume(vol * SGTL_MAXVOLUME);
+  setOutputVolume(vol);
   showCurrentParameterPage(F("Volume"), vol);
 }
 
