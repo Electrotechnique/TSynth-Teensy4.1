@@ -598,7 +598,11 @@ int32_t BandLimitedWaveformTS::process_active_steps_pulse (uint32_t new_phase, u
 {
   int32_t sample = process_active_steps (new_phase) ;
 
-  return sample + BASE_AMPLITUDE/2 - pulse_width / (0x80000000u / BASE_AMPLITUDE) ; // correct DC offset for duty cycle
+  // Correct the DC offset for the duty cycle: the raw pulse is +/-BASE_AMPLITUDE, so its mean is
+  // BASE_AMPLITUDE * (2W - 1). This used to add BASE_AMPLITUDE/2, leaving a constant DC offset of
+  // -BASE_AMPLITUDE/2. Uses the width the edges were made with (sampled once per cycle).
+  (void) pulse_width ;
+  return sample + BASE_AMPLITUDE - sampled_width / (0x80000000u / BASE_AMPLITUDE) ;
 }
 
 // Check for new steps using the phase update for the current sample for a square wave
