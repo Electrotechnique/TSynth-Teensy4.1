@@ -1897,16 +1897,110 @@ FLASHMEM void checkUSBHostStatus()
   }
 }
 
+// Audio CPU use, once a second: total, then by group of audio objects (current / max over
+// the last second, in % of the time available). Uncomment the call in loop() to use.
+struct CpuGroup
+{
+  float now = 0, max = 0;
+  void add(AudioStream &s)
+  {
+    now += s.processorUsage();
+    max += s.processorUsageMax();
+    s.processorUsageMaxReset();
+  }
+  void print(const __FlashStringHelper *name)
+  {
+    Serial.print(F("  "));
+    Serial.print(name);
+    Serial.print(F(" "));
+    Serial.print(now, 1);
+    Serial.print(F("/"));
+    Serial.print(max, 1);
+  }
+};
+
 void CPUMonitor()
 {
-  Serial.print(F(" CPU:"));
-  Serial.print(AudioProcessorUsage());
-  Serial.print(F(" ("));
-  Serial.print(AudioProcessorUsageMax());
-  Serial.print(F(")"));
-  Serial.print(F("  MEM:"));
-  Serial.println(AudioMemoryUsageMax());
-  delayMicroseconds(500);
+  static elapsedMillis sinceLast;
+  if (sinceLast < 1000)
+    return;
+  sinceLast = 0;
+
+  CpuGroup cg_osc, cg_filt, cg_env, cg_vmix, cg_fx, cg_dc, cg_lfo, cg_smix, cg_ens, cg_dcf, cg_noise, cg_out;
+  for (uint8_t i = 0; i < global.maxVoices(); i++)
+  {
+    Patch &p = global.Oscillators[i];
+    cg_osc.add(p.waveformMod_a);
+    cg_osc.add(p.waveformMod_b);
+    cg_filt.add(p.filter_);
+    cg_env.add(p.ampEnvelope_);
+    cg_env.add(p.filterEnvelope_);
+    cg_vmix.add(p.pwMixer_a);
+    cg_vmix.add(p.pwMixer_b);
+    cg_vmix.add(p.oscModMixer_a);
+    cg_vmix.add(p.oscModMixer_b);
+    cg_vmix.add(p.waveformMixer_);
+    cg_vmix.add(p.filterModMixer_);
+    cg_vmix.add(p.filterMixer_);
+    cg_fx.add(p.oscFX_);
+    cg_dc.add(p.glide_);
+    cg_dc.add(p.keytracking_);
+  }
+  PatchShared &s = global.SharedAudio[0];
+  cg_lfo.add(s.pitchLfo);
+  cg_lfo.add(s.pwmLfoA);
+  cg_lfo.add(s.pwmLfoB);
+  cg_lfo.add(s.filterLfo);
+  cg_lfo.add(s.pitchBend);
+  cg_lfo.add(s.pwa);
+  cg_lfo.add(s.pwb);
+  cg_smix.add(s.pitchMixer);
+  cg_smix.add(s.noiseMixer);
+  for (uint8_t i = 0; i < 3; i++)
+    cg_smix.add(s.voiceMixer[i]);
+  cg_smix.add(s.voiceMixerM);
+  cg_smix.add(s.volumeMixer);
+  cg_smix.add(s.effectMixerL);
+  cg_smix.add(s.effectMixerR);
+  cg_ens.add(s.ensemble);
+  cg_dcf.add(s.dcOffsetFilter);
+  cg_noise.add(global.pink);
+  cg_noise.add(global.white);
+  cg_out.add(global.i2s);
+  cg_out.add(global.usbAudio);
+  cg_out.add(global.peak);
+  cg_out.add(global.scope);
+  cg_out.add(global.cpuGuard);
+  cg_out.add(global.constant1Dc);
+  for (uint8_t i = 0; i < 3; i++)
+  {
+    cg_out.add(global.effectMixerL[i]);
+    cg_out.add(global.effectMixerR[i]);
+  }
+  cg_out.add(global.effectMixerLM);
+  cg_out.add(global.effectMixerRM);
+
+  Serial.print(F("CPU "));
+  Serial.print(AudioProcessorUsage(), 1);
+  Serial.print(F("/"));
+  Serial.print(AudioProcessorUsageMax(), 1);
+  Serial.print(F("% MEM "));
+  Serial.print(AudioMemoryUsageMax());
+  Serial.print(F(" |"));
+  cg_osc.print(F("osc"));
+  cg_filt.print(F("filter"));
+  cg_env.print(F("env"));
+  cg_vmix.print(F("vmix"));
+  cg_fx.print(F("oscfx"));
+  cg_dc.print(F("dc"));
+  cg_lfo.print(F("lfo"));
+  cg_smix.print(F("smix"));
+  cg_ens.print(F("ensemble"));
+  cg_dcf.print(F("dcfilt"));
+  cg_noise.print(F("noise"));
+  cg_out.print(F("out"));
+  Serial.println();
+  AudioProcessorUsageMaxReset();
 }
 
 void loop()

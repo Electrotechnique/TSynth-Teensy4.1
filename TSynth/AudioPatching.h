@@ -183,7 +183,10 @@ struct Patch {
 
 struct Global {
     private:
-    static const uint8_t MAX_NO_TIMBER = 2;
+    // Only one voice group (12 voices) is ever created, using SharedAudio[0]. A second set of
+    // shared objects (LFOs, mixers, ensemble, DC filter...) used to be built and ran every
+    // block producing silence.
+    static const uint8_t MAX_NO_TIMBER = 1;
     static const uint8_t MAX_NO_VOICE = 12;
 
     public:
