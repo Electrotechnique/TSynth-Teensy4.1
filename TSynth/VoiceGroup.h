@@ -643,25 +643,30 @@ public:
         float BP = 0;
         float HP = 0;
 
-        if (value == BANDPASS)
+        if (value == BANDPASS || value >= 2.0f)
         {
-            //BP mode
+            // Bandpass
             LP = 0;
             BP = 1.0f;
             HP = 0;
         }
+        else if (value > 1.0f)
+        {
+            // Highpass fading into bandpass (top of the knob)
+            LP = 0;
+            BP = value - 1.0f;
+            HP = 1.0f - BP;
+        }
         else
         {
-            //LP-HP mix mode - a notch filter
-            LP = 1.0f - value;
-            BP = 0;
-            HP = value;
+            // LP-HP mix at constant level: from LP the highs come in until a full level notch
+            // at the middle (LP + HP), then the lows go out to HP. (A plain crossfade was 6dB
+            // down at the middle.)
+            LP = value < 0.5f ? 1.0f : 2.0f * (1.0f - value);
+            HP = value > 0.5f ? 1.0f : 2.0f * value;
         }
 
-        VG_FOR_EACH_VOICE(
-            voices[i]->patch().filterMixer_.gain(0, LP);
-            voices[i]->patch().filterMixer_.gain(1, BP);
-            voices[i]->patch().filterMixer_.gain(2, HP);)
+        VG_FOR_EACH_OSC(filter_.mix(LP, BP, HP))
     }
 
     void setFilterModMixer(int channel, float level)

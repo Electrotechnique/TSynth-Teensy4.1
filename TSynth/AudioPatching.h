@@ -103,11 +103,11 @@ struct Patch {
 
     AudioFilterStateVariableTS filter_;
 
-    AudioMixer4TS filterMixer_;
+    // The LP/BP/HP mix is done inside filter_ (see AudioFilterStateVariableTS::mix)
 
     AudioEffectEnvelopeTS ampEnvelope_;
 
-    AudioConnection connections[25] = {
+    AudioConnection connections[22] = {
         {keytracking_, 0, filterModMixer_, 2},
         {pwMixer_a, 0, waveformMod_a, 1},
         {pwMixer_b, 0, waveformMod_b, 1},
@@ -121,10 +121,7 @@ struct Patch {
         {oscFX_, 0, waveformMixer_, 3},
         {waveformMixer_, 0, filter_, 0},
         {filterModMixer_, 0, filter_, 1},
-        {filter_, 0, filterMixer_, 0},
-        {filter_, 1, filterMixer_, 1},
-        {filter_, 2, filterMixer_, 2},
-        {filterMixer_, ampEnvelope_},
+        {filter_, 0, ampEnvelope_, 0},
         // Mod sources
         {oscModMixer_a, 0, waveformMod_a, 0},
         {oscModMixer_b, 0, waveformMod_b, 0},

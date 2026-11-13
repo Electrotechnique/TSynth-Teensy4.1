@@ -694,9 +694,13 @@ FLASHMEM void updateFilterMixer(float value)
   groupvec[activeGroupIndex]->setFilterMixer(value);
 
   String filterStr;
-  if (value == BANDPASS)
+  if (value == BANDPASS || value >= 2.0f)
   {
     filterStr = F("Band Pass");
+  }
+  else if (value > 1.0f)
+  {
+    filterStr = F("HP ") + String(100 - int(100 * (value - 1.0f) + 0.5f)) + F(" - ") + String(int(100 * (value - 1.0f) + 0.5f)) + F(" BP");
   }
   else
   {
@@ -1941,7 +1945,6 @@ void CPUMonitor()
     cg_vmix.add(p.oscModMixer_b);
     cg_vmix.add(p.waveformMixer_);
     cg_vmix.add(p.filterModMixer_);
-    cg_vmix.add(p.filterMixer_);
     cg_fx.add(p.oscFX_);
     cg_dc.add(p.glide_);
     cg_dc.add(p.keytracking_);
