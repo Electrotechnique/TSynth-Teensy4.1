@@ -161,6 +161,7 @@ FLASHMEM void close(){
      inc_hires = 0;//Same as STATE_DELAY
      state=STATE_IDLE; // Added, VRP. Shouldn't this be in the idle state when closed?
      ysum=0;
+     hold_after_forced = false; // otherwise the next noteOn would wait for a start() that never comes
   __enable_irq();
 }
   bool isActive();

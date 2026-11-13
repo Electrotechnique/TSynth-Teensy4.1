@@ -238,8 +238,13 @@ FLASHMEM void setup()
   reloadGlideShape();
 }
 
+// Set while flushing MIDI input on Panic: incoming messages are read and dropped
+volatile boolean midiDiscard = false;
+
 void myNoteOn(byte channel, byte note, byte velocity)
 {
+  if (midiDiscard)
+    return;
   // Check for out of range notes
   if (note + groupvec[activeGroupIndex]->params().oscPitchA < 0 || note + groupvec[activeGroupIndex]->params().oscPitchA > 127 || note + groupvec[activeGroupIndex]->params().oscPitchB < 0 || note + groupvec[activeGroupIndex]->params().oscPitchB > 127)
     return;
@@ -252,6 +257,8 @@ void myNoteOn(byte channel, byte note, byte velocity)
 
 void myNoteOff(byte channel, byte note, byte velocity)
 {
+  if (midiDiscard)
+    return;
   AudioNoInterrupts();
   groupvec[activeGroupIndex]->noteOff(note);
   AudioInterrupts();
@@ -873,6 +880,8 @@ FLASHMEM void updatePatch(String name, uint32_t index)
 
 void myPitchBend(byte channel, int bend)
 {
+  if (midiDiscard)
+    return;
   // 0.5 to give 1oct max - spread of mod is 2oct
   groupvec[activeGroupIndex]->pitchBend(bend * 0.5f * pitchBendRange * DIV12 * DIV8192);
 }
@@ -881,6 +890,8 @@ void myPitchBend(byte channel, int bend)
 
 void myControlChange(byte channel, byte control, byte value)
 {
+  if (midiDiscard)
+    return;
   if (!controlFromPanel)
   {
     // Changed by MIDI: the knob no longer matches, so it has to pick up again. MIDI is never gated.
@@ -1115,6 +1126,8 @@ void myControlChange(byte channel, byte control, byte value)
 
 FLASHMEM void myProgramChange(byte channel, byte program)
 {
+  if (midiDiscard)
+    return;
   state = PATCH;
   patchNo = program + 1;
   recallPatch(patchNo);
@@ -1125,6 +1138,8 @@ FLASHMEM void myProgramChange(byte channel, byte program)
 
 FLASHMEM void myMIDIClockStart()
 {
+  if (midiDiscard)
+    return;
   setMIDIClkSignal(true);
   // Resync LFOs when MIDI Clock starts.
   // When there's a jump to a different
@@ -1137,11 +1152,15 @@ FLASHMEM void myMIDIClockStart()
 
 FLASHMEM void myMIDIClockStop()
 {
+  if (midiDiscard)
+    return;
   setMIDIClkSignal(false);
 }
 
 void myMIDIClock()
 {
+  if (midiDiscard)
+    return;
   // This recalculates the LFO frequencies if the tempo changes (MIDI cLock is 24ppq)
   if (count > 23)
   {
@@ -1441,6 +1460,37 @@ void showSettingsPage()
   showSettingsPage(settings::current_setting(), settings::current_setting_value(), state);
 }
 
+// Read and drop everything waiting in the MIDI inputs, so a backlog from a flood of MIDI
+// doesn't keep playing after Panic. Bounded in time in case the sender keeps going.
+#define MIDI_FLUSH_MAX_MS 50
+void flushMidiInput()
+{
+  midiDiscard = true;
+  elapsedMillis t;
+  bool more = true;
+  while (more && t < MIDI_FLUSH_MAX_MS)
+  {
+    more = false;
+    myusb.Task();
+    if (midi1.read())   // USB host
+      more = true;
+    if (usbMIDI.read()) // USB device
+      more = true;
+  }
+  // 5 pin DIN: drop the unread bytes without parsing them, so they aren't sent to MIDI thru
+  Serial1.clear();
+  midiDiscard = false;
+}
+
+void panic()
+{
+  flushMidiInput();
+  AudioNoInterrupts();
+  groupvec[activeGroupIndex]->panic();
+  AudioInterrupts();
+  showCurrentParameterPage(F("Panic"), F("All notes off"));
+}
+
 void checkSwitches()
 {
   unisonSwitch.update();
@@ -1555,9 +1605,8 @@ void checkSwitches()
   backButton.update();
   if (backButton.held())
   {
-    // If Back button held, Panic - all notes off
-    groupvec[activeGroupIndex]->allNotesOff();
-    groupvec[activeGroupIndex]->closeEnvelopes();
+    // If Back button held, Panic: drop any MIDI waiting to be read, then silence all voices
+    panic();
   }
   else if (backButton.numClicks() == 1)
   {

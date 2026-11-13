@@ -931,6 +931,17 @@ public:
         {
             voices[i]->noteOff();
         }
+        // Keep the voice count and mono note history in step, or unison voice allocation
+        // and mono retriggering work from stale notes
+        this->voicesOn = 0;
+        noteStack.clear();
+    }
+
+    // Silence everything at once: notes off and envelopes closed
+    void panic()
+    {
+        allNotesOff();
+        closeEnvelopes();
     }
 
     void updateVoices()
