@@ -120,6 +120,11 @@ private:
   float vt_w ;           // latched width
   float vt_inv_w ;       // 1/W and 1/(1-W), worked out once per cycle
   float vt_inv_1mw ;
+  int vt_dc_count = 0 ;  // start-up DC fix: samples left to measure
+  int vt_dc_period = 0 ;
+  int vt_dc_ramp = 0 ;   // samples left to apply
+  float vt_dc_sum = 0.0f ;
+  float vt_dc_step = 0.0f ;
   uint32_t vt_w32 ;
   bool vt_rising ;
   bool vt_sync ;         // align to the real phase on the next sample
@@ -129,6 +134,7 @@ private:
   void vt_corners (uint32_t new_phase, uint32_t pulse_width, uint32_t dphase, int i) ;
   inline float vt_ref_at (uint32_t phase) ;
   inline void vt_set_width (uint32_t w32) ;
+  inline void vt_dc_track (float &y) ;
 };
 
 

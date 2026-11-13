@@ -9,11 +9,11 @@
 
 class Mixer {
     private:
-    AudioMixer4& mixer;
+    AudioMixer4TS& mixer;
     uint8_t index;
 
     public:
-    Mixer(AudioMixer4& mixer_, uint8_t index_): mixer(mixer_), index(index_) {}
+    Mixer(AudioMixer4TS& mixer_, uint8_t index_): mixer(mixer_), index(index_) {}
 
     void gain(float value) {
         mixer.gain(index, value);
@@ -23,22 +23,22 @@ class Mixer {
 struct PatchShared {
     AudioSynthWaveformDcTS pitchBend;
     AudioSynthWaveformTS pitchLfo;
-    AudioMixer4 pitchMixer;
+    AudioMixer4TS pitchMixer;
     AudioSynthWaveformTS pwmLfoA;
     AudioSynthWaveformTS pwmLfoB;
     AudioSynthWaveformTS filterLfo;
     AudioSynthWaveformDcTS pwa;
     AudioSynthWaveformDcTS pwb;
-    AudioMixer4 noiseMixer;
+    AudioMixer4TS noiseMixer;
 
-    AudioMixer4 voiceMixer[3];
-    AudioMixer4 voiceMixerM;
+    AudioMixer4TS voiceMixer[3];
+    AudioMixer4TS voiceMixerM;
 
     AudioEffectEnsemble ensemble;
     AudioFilterStateVariableTS dcOffsetFilter;
-    AudioMixer4 volumeMixer;
-    AudioMixer4 effectMixerL;
-    AudioMixer4 effectMixerR;
+    AudioMixer4TS volumeMixer;
+    AudioMixer4TS effectMixerL;
+    AudioMixer4TS effectMixerR;
 
     AudioConnection connections[12] = {
         {pitchBend, 0, pitchMixer, 0},
@@ -70,7 +70,7 @@ struct PatchShared {
         whiteNoiseConnection = new AudioConnection(white, 0, noiseMixer, 1);
     }
 
-    void connectOutput(AudioMixer4& left, AudioMixer4& right, uint8_t index) {
+    void connectOutput(AudioMixer4TS& left, AudioMixer4TS& right, uint8_t index) {
         delete outputLConnection;
         delete outputRConnection;
         outputLConnection = new AudioConnection(effectMixerL, 0, left, index);
@@ -82,28 +82,28 @@ struct PatchShared {
 struct Patch {
     AudioEffectEnvelopeTS filterEnvelope_;
 
-    AudioMixer4 pwMixer_a;
-    AudioMixer4 pwMixer_b;
+    AudioMixer4TS pwMixer_a;
+    AudioMixer4TS pwMixer_b;
 
     AudioSynthWaveformDcTS glide_;
 
     AudioSynthWaveformDcTS keytracking_;
 
-    AudioMixer4 oscModMixer_a;
-    AudioMixer4 oscModMixer_b;
+    AudioMixer4TS oscModMixer_a;
+    AudioMixer4TS oscModMixer_b;
 
     AudioSynthWaveformModulatedTS waveformMod_a;
     AudioSynthWaveformModulatedTS waveformMod_b;
 
     AudioEffectDigitalCombine oscFX_;
 
-    AudioMixer4 waveformMixer_;
+    AudioMixer4TS waveformMixer_;
 
-    AudioMixer4 filterModMixer_;
+    AudioMixer4TS filterModMixer_;
 
     AudioFilterStateVariableTS filter_;
 
-    AudioMixer4 filterMixer_;
+    AudioMixer4TS filterMixer_;
 
     AudioEffectEnvelopeTS ampEnvelope_;
 
@@ -197,10 +197,10 @@ struct Global {
     AudioAnalyzePeak         peak;
     Oscilloscope             scope;
     AudioCpuGuard            cpuGuard;
-    AudioMixer4              effectMixerR[3];
-    AudioMixer4              effectMixerRM;
-    AudioMixer4              effectMixerL[3];
-    AudioMixer4              effectMixerLM;
+    AudioMixer4TS              effectMixerR[3];
+    AudioMixer4TS              effectMixerRM;
+    AudioMixer4TS              effectMixerL[3];
+    AudioMixer4TS              effectMixerLM;
     AudioOutputI2S           i2s;
 
     PatchShared SharedAudio[MAX_NO_TIMBER];

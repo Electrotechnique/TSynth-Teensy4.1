@@ -809,6 +809,8 @@ void BandLimitedWaveformTS::init_pulse (uint32_t freq_word, uint32_t pulse_width
 
 #define TRI_MIN_WIDTH 0x00400000u        // 1/1024 of the cycle, avoids dividing by zero
 #define TRI_DRIFT_K 0.0005f              // drift correction per sample
+#define VT_DC_MAX_PERIOD 4096            // longest cycle measured for the start-up DC fix
+#define VT_DC_RAMP 64                    // samples over which that fix is applied
 #define TRI_OUT_SCALE (0.92f * 32767.0f) // a little headroom for overshoot at extreme widths
 
 inline void BandLimitedWaveformTS::vt_set_width (uint32_t w32)
@@ -817,6 +819,26 @@ inline void BandLimitedWaveformTS::vt_set_width (uint32_t w32)
   vt_w = w32 * (1.0f / 4294967296.0f) ;
   vt_inv_w = 1.0f / vt_w ;
   vt_inv_1mw = 1.0f / (1.0f - vt_w) ;
+}
+
+// Start-up DC fix (see the sync code): measure, then remove gradually. Cheap when idle.
+inline void BandLimitedWaveformTS::vt_dc_track (float &y)
+{
+  if (vt_dc_count > 0)
+  {
+    if (vt_dc_count <= vt_dc_period)
+      vt_dc_sum += y ;
+    if (--vt_dc_count == 0)
+    {
+      vt_dc_step = vt_dc_sum / (float) vt_dc_period / VT_DC_RAMP ;
+      vt_dc_ramp = VT_DC_RAMP ;
+    }
+  }
+  else if (vt_dc_ramp > 0)
+  {
+    y -= vt_dc_step ;
+    vt_dc_ramp-- ;
+  }
 }
 
 inline float BandLimitedWaveformTS::vt_ref_at (uint32_t phase)
@@ -901,6 +923,7 @@ int16_t BandLimitedWaveformTS::vt_step (uint32_t new_phase, uint32_t pulse_width
   vt_y += d * dp ;
   // Per sample: doing this every few samples instead adds spurious tones
   vt_y += TRI_DRIFT_K * (ref - vt_y) ;
+  vt_dc_track (vt_y) ;
   if (vt_y > 1.5f) vt_y = 1.5f ;
   else if (vt_y < -1.5f) vt_y = -1.5f ;
 
@@ -919,16 +942,18 @@ int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, u
 
   if (vt_sync)
   {
-    // First sample after the waveform was selected: start from the real phase. Fill the
-    // delay with the plain triangle's slope, then run 32 samples up to the current one.
+    // First sample after the waveform was selected (or a silent voice resumed): start from
+    // the real phase by filling the 16 sample delay with the plain triangle's slope for
+    // the samples before this one. Their corners aren't band-limited, but this is the very
+    // start of a note. (A 32 sample pre-roll used to be run here instead; with many notes
+    // starting together that was a noticeable CPU spike.)
     vt_sync = false ;
     const uint32_t inc = vt_inc ;
-    const uint32_t start = new_phase - 32 * inc ;
     vt_set_width (pulse_width) ;
     for (int k = 0 ; k < 32 ; k++)
       vt_future [k] = 0.0f ;
     vt_fpos = 0 ;
-    uint32_t p = start - 16 * inc ;
+    uint32_t p = new_phase - 16 * inc ;
     vt_y = vt_ref_at (p - inc) ;
     for (int k = 0 ; k < 16 ; k++, p += inc)
     {
@@ -937,11 +962,19 @@ int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, u
       vt_dph [idx] = inc * (1.0f / 4294967296.0f) ;
       vt_ref [idx] = vt_ref_at (p) ;
     }
-    vt_rising = start < vt_w32 ;
+    // Corners near the start aren't placed exactly, which leaves a small DC offset (up to a
+    // few % of full scale at high pitches) that the drift correction would take ~100ms to
+    // remove. A triangle averages zero over a cycle, so measure the mean over the first
+    // cycle (after the 16 filled samples) and remove it, spread over VT_DC_RAMP samples.
+    uint32_t period = inc > 0 ? (uint32_t) (4294967296.0f / inc) : 0 ;
+    if (period > VT_DC_MAX_PERIOD) period = VT_DC_MAX_PERIOD ;
+    vt_dc_period = period ;
+    vt_dc_count = period > 0 ? 16 + period : 0 ;
+    vt_dc_sum = 0.0f ;
+    vt_dc_ramp = 0 ;
+    phase_word = new_phase - inc ;
+    vt_rising = phase_word < vt_w32 ;
     vt_level = vt_rising ? 2.0f * vt_inv_w : -2.0f * vt_inv_1mw ;
-    phase_word = start - inc ;
-    for (int k = 0 ; k < 32 ; k++)
-      vt_step (start + k * inc, pulse_width, i + k) ; // i + 32 is the same slot as i
   }
   return vt_step (new_phase, pulse_width, i) ;
 }
@@ -993,6 +1026,7 @@ void BandLimitedWaveformTS::generate_triangle_variable_block (const uint32_t *ph
 
     y += d * dp ;
     y += TRI_DRIFT_K * (ref - y) ;
+    vt_dc_track (y) ;
     if (y > 1.5f) y = 1.5f ;
     else if (y < -1.5f) y = -1.5f ;
 

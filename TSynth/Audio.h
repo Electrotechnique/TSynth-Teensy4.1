@@ -69,5 +69,6 @@
 #include "synth_pinknoise.h"
 #include "Oscilloscope.h"
 #include "effect_cpuguard.h"
+#include "mixer_ts.h"
 #include "analyze_peak.h"
 #endif
