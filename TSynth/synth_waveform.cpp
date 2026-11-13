@@ -884,6 +884,7 @@ int16_t BandLimitedWaveformTS::vt_step (uint32_t new_phase, uint32_t pulse_width
   phase_word = new_phase ;
 
   vt_y += d * dp ;
+  // Per sample: doing this every few samples instead adds spurious tones
   vt_y += TRI_DRIFT_K * (ref - vt_y) ;
   if (vt_y > 1.5f) vt_y = 1.5f ;
   else if (vt_y < -1.5f) vt_y = -1.5f ;

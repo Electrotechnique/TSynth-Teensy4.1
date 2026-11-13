@@ -108,6 +108,7 @@ private:
 	float tpt_log2fc_now = 0, tpt_k_now = 0, tpt_gain_now = 0, tpt_oct_now = 0;
 	bool tpt_started = false;
 	float tpt_s1 = 0, tpt_s2 = 0;
+	float tpt_g = 0, tpt_hc = 0; // coefficients at the last update point
 	int32_t setting_fcenter;
 	int32_t setting_fmult;
 	int32_t setting_octavemult;

@@ -221,6 +221,9 @@ void AudioFilterStateVariableTS::update_variable(const int16_t *in,
 // worked out per sample from the control input like the Chamberlin version.
 
 #define TPT_MAX_FC (0.45f * AUDIO_SAMPLE_RATE_EXACT) // ~19.9kHz
+#ifndef TPT_COEF_INTERVAL
+#define TPT_COEF_INTERVAL 4 // samples between cutoff coefficient updates (must divide 128)
+#endif
 #define TPT_MIN_FC 1.0f
 
 // 2^x, about 0.25 cent accurate, for |x| < 30
@@ -263,21 +266,42 @@ void AudioFilterStateVariableTS::update_tpt(const int16_t *in, const int16_t *ct
 	float s1 = tpt_s1, s2 = tpt_s2;
 	const float wscale = 3.14159265f / AUDIO_SAMPLE_RATE_EXACT;
 
-	for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-		log2fc += d_log2fc; k += d_k; gain += d_gain; oct += d_oct;
-		float lf = log2fc;
-		if (ctl) lf += ctl[i] * (1.0f / 32768.0f) * oct;
+	// The cutoff coefficients (2^x, tan and a division) are worked out every
+	// TPT_COEF_INTERVAL samples, at the last sample of each group, and interpolated in
+	// between. The control input moves far slower than that, and this was most of the
+	// filter's cost.
+	auto coefficients = [&](int i, float lfc, float kk, float oc, float &g_out, float &hc_out) {
+		float lf = lfc;
+		if (ctl) lf += ctl[i] * (1.0f / 32768.0f) * oc;
 		float fc = tpt_exp2(lf);
 		if (fc > TPT_MAX_FC) fc = TPT_MAX_FC;
 		else if (fc < TPT_MIN_FC) fc = TPT_MIN_FC;
 		// g = n/d and 1/(1 + g(g + k)) = d^2/q with q = d^2 + n(n + k d): one division gives both
 		float n, d;
 		tpt_tan(fc * wscale, n, d);
-		const float q = d * d + n * (n + k * d);
+		const float q = d * d + n * (n + kk * d);
 		const float inv = 1.0f / (d * q);
-		const float g = n * q * inv;
+		g_out = n * q * inv;
+		hc_out = d * d * d * inv;
+	};
+	if (tpt_hc == 0.0f) // first block: start from the current values
+		coefficients(0, log2fc, k, oct, tpt_g, tpt_hc);
+	float g = tpt_g, hc = tpt_hc, dg = 0, dhc = 0;
+
+	for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+		if ((i % TPT_COEF_INTERVAL) == 0) {
+			const int last = i + TPT_COEF_INTERVAL - 1;
+			const float n_steps = (float)(last + 1);
+			float g_end, hc_end;
+			coefficients(last, tpt_log2fc_now + d_log2fc * n_steps, tpt_k_now + d_k * n_steps,
+				tpt_oct_now + d_oct * n_steps, g_end, hc_end);
+			dg = (g_end - g) * (1.0f / TPT_COEF_INTERVAL);
+			dhc = (hc_end - hc) * (1.0f / TPT_COEF_INTERVAL);
+		}
+		log2fc += d_log2fc; k += d_k; gain += d_gain; oct += d_oct;
+		g += dg; hc += dhc;
 		const float x = in[i] * gain;
-		const float h = (x - (k + g) * s1 - s2) * (d * d * d * inv);
+		const float h = (x - (k + g) * s1 - s2) * hc;
 		const float v1 = g * h;
 		const float b = v1 + s1;
 		s1 = b + v1;
@@ -298,6 +322,7 @@ void AudioFilterStateVariableTS::update_tpt(const int16_t *in, const int16_t *ct
 	if (!(s1 < 1e7f && s1 > -1e7f)) s1 = 0;
 	if (!(s2 < 1e7f && s2 > -1e7f)) s2 = 0;
 	tpt_s1 = s1; tpt_s2 = s2;
+	tpt_g = g; tpt_hc = hc;
 	tpt_log2fc_now = log2fc_end; tpt_k_now = k_end; tpt_gain_now = gain_end; tpt_oct_now = oct_end;
 }
 

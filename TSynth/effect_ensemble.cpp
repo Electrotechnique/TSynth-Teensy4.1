@@ -35,6 +35,7 @@ extern "C"
 }
 
 #define BASE_DELAY 512 // samples (~11.6ms)
+#define LFO_INTERVAL 8  // samples between LFO updates (must divide 128)
 
 // The six taps are partly decorrelated, so their average is 4-9dB quieter than the
 // input (more for bright sounds). Output = sum of taps / WET_DIVISOR: 6 = plain average,
@@ -139,19 +140,45 @@ void AudioEffectEnsemble::update(void)
   const uint32_t incFast = lfoIncFast;
   const int32_t baseQ16 = BASE_DELAY << 16;
 
+  // Tap delays from the LFOs (Q16 samples). The LFOs are below 5Hz, so they are worked out
+  // every LFO_INTERVAL samples and the delays interpolated in between, rather than doing
+  // 18 sine lookups every sample.
+  auto tapDelays = [&](uint32_t phSlow, uint32_t phFast, int32_t *dl, int32_t *dr) {
+    for (int t = 0; t < ENSEMBLE_TAPS; t++)
+    {
+      uint32_t phS = phSlow + TAP_OFFSET_SLOW[t];
+      int32_t fast = sineQ15(phFast + TAP_OFFSET_FAST[t]);
+      dl[t] = baseQ16 - lfoQ16(sineQ15(phS), fast);
+      // Right: fast LFO is shifted 180 degrees, i.e. negated
+      dr[t] = baseQ16 - lfoQ16(sineQ15(phS + RIGHT_OFFSET_SLOW), -fast);
+    }
+  };
+  int32_t dl[ENSEMBLE_TAPS], dr[ENSEMBLE_TAPS], stepL[ENSEMBLE_TAPS], stepR[ENSEMBLE_TAPS];
+  tapDelays(lfoPhaseSlow, lfoPhaseFast, dl, dr);
+
   for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++)
   {
+    if ((i % LFO_INTERVAL) == 0)
+    {
+      int32_t el[ENSEMBLE_TAPS], er[ENSEMBLE_TAPS];
+      tapDelays(lfoPhaseSlow + LFO_INTERVAL * incSlow, lfoPhaseFast + LFO_INTERVAL * incFast, el, er);
+      for (int t = 0; t < ENSEMBLE_TAPS; t++)
+      {
+        stepL[t] = (el[t] - dl[t]) / LFO_INTERVAL;
+        stepR[t] = (er[t] - dr[t]) / LFO_INTERVAL;
+      }
+    }
+
     delayBuffer[writeIndex] = block ? block->data[i] : 0;
 
     int32_t sumL = 0;
     int32_t sumR = 0;
     for (int t = 0; t < ENSEMBLE_TAPS; t++)
     {
-      uint32_t phS = lfoPhaseSlow + TAP_OFFSET_SLOW[t];
-      int32_t fast = sineQ15(lfoPhaseFast + TAP_OFFSET_FAST[t]);
-      sumL += readTap(baseQ16 - lfoQ16(sineQ15(phS), fast));
-      // Right: fast LFO is shifted 180 degrees, i.e. negated
-      sumR += readTap(baseQ16 - lfoQ16(sineQ15(phS + RIGHT_OFFSET_SLOW), -fast));
+      sumL += readTap(dl[t]);
+      sumR += readTap(dr[t]);
+      dl[t] += stepL[t];
+      dr[t] += stepR[t];
     }
     outblock->data[i] = saturate16(sumL / WET_DIVISOR);
     outblockB->data[i] = saturate16(sumR / WET_DIVISOR);
