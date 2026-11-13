@@ -501,82 +501,92 @@ extern "C"
   extern const int16_t step_table [258] ;
 }
 
-int32_t BandLimitedWaveformTS::lookup (int offset)
+// The step table only stores half the step (odd symmetry). Unfolding it once into a full
+// table, with BASE_AMPLITUDE included, removes the mirror branch and offset from every
+// lookup. Every active step does a lookup on every sample, so at high pitches this is
+// where the oscillator's time goes. Results are identical to the folded table.
+static int32_t full_step [N + 1] ;
+static int32_t full_delta [N] ;      // full_step [k+1] - full_step [k], for interpolation
+static float full_step_norm [N + 1] ; // the same, scaled 0..1, for the variable triangle
+static float full_delta_norm [N] ;
+static bool full_step_ready = false ;
+
+static void build_full_step (void)
+{
+  for (int k = 0 ; k <= N ; k++)
+  {
+    full_step [k] = BASE_AMPLITUDE + (k < N/2 ? step_table [k+1] : - step_table [N-k]) ;
+    full_step_norm [k] = full_step [k] * (1.0f / (2 * BASE_AMPLITUDE)) ;
+  }
+  for (int k = 0 ; k < N ; k++)
+  {
+    full_delta [k] = full_step [k+1] - full_step [k] ;
+    full_delta_norm [k] = full_step_norm [k+1] - full_step_norm [k] ;
+  }
+  full_step_ready = true ;
+}
+
+// Interpolated table value. Same result as (frac*b + (GUARD-frac)*a + HALF_GUARD) >> GUARD_BITS.
+// A step's fraction (low bits of its offset) never changes, as it moves on by whole entries.
+static inline int32_t step_at (int idx, int frac)
+{
+  return full_step [idx] + ((frac * full_delta [idx] + HALF_GUARD) >> GUARD_BITS) ;
+}
+
+inline int32_t BandLimitedWaveformTS::lookup (int offset)
 {
   int off = offset >> GUARD_BITS ;
   int frac = offset & (GUARD-1) ;
-
-  int32_t a, b ;
-  if (off < N/2)   // handle odd symmetry by reflecting table
-  {
-    a = step_table [off+1] ;
-    b = step_table [off+2] ;
-  }
-  else
-  {
-    a = - step_table [N-off] ;
-    b = - step_table [N-off-1] ;
-  }
-  return  BASE_AMPLITUDE + ((frac * b + (GUARD - frac) * a + HALF_GUARD) >> GUARD_BITS) ; // interpolated
+  int32_t a = full_step [off] ;
+  int32_t b = full_step [off+1] ;
+  return (frac * b + (GUARD - frac) * a + HALF_GUARD) >> GUARD_BITS ; // interpolated
 }
 
 // create a new step, apply its past waveform into the cyclic sample buffer
 // and add a step_state object into active list so it can be added for the future samples
 void BandLimitedWaveformTS::insert_step (int offset, bool rising, int i)
 {
+  const int frac = offset & (GUARD-1) ;
+  const int32_t sign = rising ? 1 : -1 ;
+  while (offset < 0) // not reached yet
+  {
+    offset += SCALE<<GUARD_BITS ;
+    i ++ ;
+  }
+  // Before the step: into the delayed samples still to be output
   while (offset <= (N/2-SCALE)<<GUARD_BITS)
   {
-    if (offset >= 0)
-      cyclic [i & 15] += rising ? lookup (offset) : -lookup (offset) ;
+    cyclic [i & 15] += sign * step_at (offset >> GUARD_BITS, frac) ;
     offset += SCALE<<GUARD_BITS ;
     i ++ ;
   }
 
-  states[newptr].offset = offset ;
-  states[newptr].positive = rising ;
-  newptr = (newptr+1) & PTRMASK ;
+  // From this sample on: the whole step as a level change, plus the residual of its shape
+  // (table value minus full step) for the samples it still has to play out.
+  dc_offset += sign * 2*BASE_AMPLITUDE ;
+  int k = fut_pos ;
+  while (offset < N<<GUARD_BITS)
+  {
+    future [k & 31] += sign * (step_at (offset >> GUARD_BITS, frac) - 2*BASE_AMPLITUDE) ;
+    offset += SCALE<<GUARD_BITS ;
+    k ++ ;
+  }
 }
 
-// generate value for current sample from one active step, checking for the
-// dc_offset adjustment at the end of the table.
-int32_t BandLimitedWaveformTS::process_step (int i)
+void BandLimitedWaveformTS::reset_steps (void)
 {
-  int off = states[i].offset ;
-  bool positive = states[i].positive ;
-
-  int32_t entry = lookup (off) ;
-  off += SCALE<<GUARD_BITS ;
-  states[i].offset = off ;  // update offset in table for next sample
-  if (off >= N<<GUARD_BITS)             // at end of step table we alter dc_offset to extend the step into future
-    dc_offset += positive ? 2*BASE_AMPLITUDE : -2*BASE_AMPLITUDE ;
-
-  return positive ? entry : -entry ;
+  for (int k = 0 ; k < 32 ; k++)
+    future [k] = 0 ;
+  fut_pos = 0 ;
 }
 
-// process all active steps for current sample, basically generating the waveform portion
-// due only to steps
-// square waves use this directly.
+// Waveform value for the current sample from the steps: level plus residuals
 int32_t BandLimitedWaveformTS::process_active_steps (uint32_t new_phase)
 {
-  int32_t sample = dc_offset ;
-  
-  int step_count = (newptr - delptr) & PTRMASK ;
-  if (step_count > 0)        // for any steps in-flight we sum in table entry and update its state
-  {
-    int i = newptr ;
-    do
-    {
-      i = (i-1) & PTRMASK ;
-      sample += process_step (i) ;
-    } while (i != delptr) ;
-    if (states[delptr].offset >= N<<GUARD_BITS)  // remove any finished entries from the buffer.
-    {
-      delptr = (delptr+1) & PTRMASK ;
-      // can be upto two steps per sample now for pulses
-      if (newptr != delptr && states[delptr].offset >= N<<GUARD_BITS)
-  delptr = (delptr+1) & PTRMASK ;
-    }
-  }
+  const int k = fut_pos & 31 ;
+  int32_t sample = dc_offset + future [k] ;
+  future [k] = 0 ;
+  fut_pos ++ ;
   return sample ;
 }
 
@@ -717,8 +727,7 @@ int16_t BandLimitedWaveformTS::generate_pulse (uint32_t new_phase, uint32_t puls
 void BandLimitedWaveformTS::init_sawtooth (uint32_t freq_word)
 {
   phase_word = 0 ;
-  newptr = 0 ;
-  delptr = 0 ;
+  reset_steps () ;
   for (int i = 0 ; i < 2*SUPPORT ; i++)
     phase_word -= freq_word ;
   dc_offset = phase_word < DEG180 ? BASE_AMPLITUDE : -BASE_AMPLITUDE ;
@@ -741,8 +750,7 @@ void BandLimitedWaveformTS::init_pulse (uint32_t freq_word, uint32_t pulse_width
 {
   phase_word = 0 ;
   sampled_width = pulse_width ;
-  newptr = 0 ;
-  delptr = 0 ;
+  reset_steps () ;
   for (int i = 0 ; i < 2*SUPPORT ; i++)
     phase_word -= freq_word ;
 
@@ -768,30 +776,106 @@ void BandLimitedWaveformTS::init_pulse (uint32_t freq_word, uint32_t pulse_width
 
 // Band-limited variable triangle.
 //
-// The slope of a triangle that rises for a fraction W of the cycle and falls for the rest
-// is a pulse wave: +2/W while rising, -2/(1-W) while falling. Integrating a band-limited
-// pulse therefore gives a band-limited triangle (equivalent to BLAMP corner correction),
-// with the same quality as the band-limited pulse, including at extreme widths where the
-// triangle becomes saw-like. A slow pull towards the plain triangle stops integrator drift
-// and keeps the level right while the width or pitch changes.
+// The triangle rises for a fraction W of the cycle and falls for the rest, so its slope is
+// +2/W then -2/(1-W) (per cycle). Each corner is a band-limited step in the slope, of
+// whatever size the corner needs, made with the same step table as the other waveforms;
+// the slope is then integrated. W is latched at the start of each cycle (like the pulse
+// width), so a width change just sets the size of that cycle's corners and stays exact
+// under fast modulation. A very slow pull towards the plain triangle (~3.5Hz) only has to
+// mop up rounding.
 //
-// The pulse is high for phase 0..W, so the triangle runs from -1 at phase 0 up to +1 at W.
-// That is the plain variable triangle shifted by W/2, which sounds the same.
+// Phase 0..W rises from -1 to +1: the plain variable triangle shifted by W/2, which
+// sounds the same.
 
 #define TRI_MIN_WIDTH 0x00400000u        // 1/1024 of the cycle, avoids dividing by zero
-#define TRI_DRIFT_K 0.002f               // drift correction per sample (~14Hz)
+#define TRI_DRIFT_K 0.0005f              // drift correction per sample
 #define TRI_OUT_SCALE (0.92f * 32767.0f) // a little headroom for overshoot at extreme widths
 
-// Slope terms and reference triangle for one (undelayed) sample, stored for 16 samples later
-void BandLimitedWaveformTS::tri_terms (uint32_t new_phase, uint32_t dphase, int i)
+inline float BandLimitedWaveformTS::vt_ref_at (uint32_t phase)
 {
-  const float W = sampled_width * (1.0f / 4294967296.0f) ;
-  const float ph = new_phase * (1.0f / 4294967296.0f) ;
-  const float g = (dphase * (1.0f / 4294967296.0f)) / (W * (1.0f - W)) ;
+  float ph = phase * (1.0f / 4294967296.0f) ;
+  return ph < vt_w ? 2.0f * ph / vt_w - 1.0f : 1.0f - 2.0f * (ph - vt_w) / (1.0f - vt_w) ;
+}
+
+// New corner, dist into this sample's phase step of dphase. As insert_step: the part before
+// the corner goes into the delayed samples, the rest is applied as the step plays out.
+void BandLimitedWaveformTS::vt_insert (uint32_t dist, uint32_t dphase, float amp, int i)
+{
+  int offset = (int) ((float) dist / (float) dphase * (SCALE<<GUARD_BITS)) ;
+  if (offset >= SCALE<<GUARD_BITS)
+    offset = (SCALE<<GUARD_BITS) - 1 ;
+  offset = - offset ;
+  const float frac = (offset & (GUARD-1)) * (1.0f / GUARD) ;
+  while (offset < 0)
+  {
+    offset += SCALE<<GUARD_BITS ;
+    i ++ ;
+  }
+  while (offset <= (N/2-SCALE)<<GUARD_BITS)
+  {
+    const int idx = offset >> GUARD_BITS ;
+    vt_cyc [i & 15] += amp * (full_step_norm [idx] + frac * full_delta_norm [idx]) ;
+    offset += SCALE<<GUARD_BITS ;
+    i ++ ;
+  }
+  vt_level += amp ;
+  int k = vt_fpos ;
+  while (offset < N<<GUARD_BITS)
+  {
+    const int idx = offset >> GUARD_BITS ;
+    vt_future [k & 31] += amp * (full_step_norm [idx] + frac * full_delta_norm [idx] - 1.0f) ;
+    offset += SCALE<<GUARD_BITS ;
+    k ++ ;
+  }
+}
+
+int16_t BandLimitedWaveformTS::vt_step (uint32_t new_phase, uint32_t pulse_width, int i)
+{
+  const uint32_t dphase = new_phase - phase_word ;
+
+  // Corners in this sample, in time order
+  if (vt_rising && phase_word < vt_w32 && (new_phase >= vt_w32 || new_phase < phase_word))
+  {
+    vt_insert (vt_w32 - phase_word, dphase, -2.0f / (1.0f - vt_w) - 2.0f / vt_w, i) ;
+    vt_rising = false ;
+  }
+  if (!vt_rising && new_phase < phase_word) // start of cycle
+  {
+    const float fall = 2.0f / (1.0f - vt_w) ;
+    vt_w32 = pulse_width ;
+    vt_w = pulse_width * (1.0f / 4294967296.0f) ;
+    vt_insert (- phase_word, dphase, 2.0f / vt_w + fall, i) ;
+    vt_rising = true ;
+    if (new_phase >= vt_w32) // narrow: also past the top corner
+    {
+      vt_insert (vt_w32 - phase_word, dphase, -2.0f / (1.0f - vt_w) - 2.0f / vt_w, i) ;
+      vt_rising = false ;
+    }
+  }
+
+  // Slope for this sample
+  const int f = vt_fpos & 31 ;
+  const float slope = vt_level + vt_future [f] ;
+  vt_future [f] = 0.0f ;
+  vt_fpos ++ ;
+
+  // Integrate the delayed slope
   const int idx = i & 15 ;
-  tri_gain[idx] = g ;
-  tri_offset[idx] = (1.0f - 2.0f * W) * g ;
-  tri_ref[idx] = ph < W ? 2.0f * ph / W - 1.0f : 1.0f - 2.0f * (ph - W) / (1.0f - W) ;
+  const float d = vt_cyc [idx], dp = vt_dph [idx], ref = vt_ref [idx] ;
+  vt_cyc [idx] = slope ;
+  vt_dph [idx] = dphase * (1.0f / 4294967296.0f) ;
+  vt_ref [idx] = vt_ref_at (new_phase) ;
+  phase_word = new_phase ;
+
+  vt_y += d * dp ;
+  vt_y += TRI_DRIFT_K * (ref - vt_y) ;
+  if (vt_y > 1.5f) vt_y = 1.5f ;
+  else if (vt_y < -1.5f) vt_y = -1.5f ;
+
+  int32_t out = (int32_t) (vt_y * TRI_OUT_SCALE) ;
+  if (out > 32767) out = 32767 ;
+  else if (out < -32768) out = -32768 ;
+  return (int16_t) out ;
 }
 
 int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, uint32_t pulse_width, int i)
@@ -801,64 +885,52 @@ int16_t BandLimitedWaveformTS::generate_triangle_variable (uint32_t new_phase, u
   else if (pulse_width > 0xFFFFFFFFu - TRI_MIN_WIDTH)
     pulse_width = 0xFFFFFFFFu - TRI_MIN_WIDTH ;
 
-  const uint32_t dphase = new_phase - phase_word ;
-  new_step_check_pulse (new_phase, pulse_width, i) ;
-  int32_t val = process_active_steps (new_phase) ; // raw pulse, +/-BASE_AMPLITUDE
-
-  const int idx = i & 15 ;
-  // Values from 16 samples ago, matching the delayed pulse sample
-  const int32_t pulse = cyclic [idx] ;
-  const float g = tri_gain [idx], o = tri_offset [idx], ref = tri_ref [idx] ;
-  cyclic [idx] = val ;
-  tri_terms (new_phase, dphase, i) ;
-  phase_word = new_phase ;
-
-  tri_y += pulse * (1.0f / BASE_AMPLITUDE) * g + o ;
-  tri_y += TRI_DRIFT_K * (ref - tri_y) ;
-  // Limit the transient after a waveform change, when the phase jumps
-  if (tri_y > 1.5f) tri_y = 1.5f ;
-  else if (tri_y < -1.5f) tri_y = -1.5f ;
-
-  int32_t out = (int32_t) (tri_y * TRI_OUT_SCALE) ;
-  if (out > 32767) out = 32767 ;
-  else if (out < -32768) out = -32768 ;
-  return (int16_t) out ;
+  if (vt_sync)
+  {
+    // First sample after the waveform was selected: start from the real phase. Fill the
+    // delay with the plain triangle's slope, then run 32 samples up to the current one.
+    vt_sync = false ;
+    const uint32_t inc = vt_inc ;
+    const uint32_t start = new_phase - 32 * inc ;
+    vt_w32 = pulse_width ;
+    vt_w = pulse_width * (1.0f / 4294967296.0f) ;
+    for (int k = 0 ; k < 32 ; k++)
+      vt_future [k] = 0.0f ;
+    vt_fpos = 0 ;
+    uint32_t p = start - 16 * inc ;
+    vt_y = vt_ref_at (p - inc) ;
+    for (int k = 0 ; k < 16 ; k++, p += inc)
+    {
+      const int idx = (i + k) & 15 ;
+      vt_cyc [idx] = p < vt_w32 ? 2.0f / vt_w : -2.0f / (1.0f - vt_w) ;
+      vt_dph [idx] = inc * (1.0f / 4294967296.0f) ;
+      vt_ref [idx] = vt_ref_at (p) ;
+    }
+    vt_rising = start < vt_w32 ;
+    vt_level = vt_rising ? 2.0f / vt_w : -2.0f / (1.0f - vt_w) ;
+    phase_word = start - inc ;
+    for (int k = 0 ; k < 32 ; k++)
+      vt_step (start + k * inc, pulse_width, i + k) ; // i + 32 is the same slot as i
+  }
+  return vt_step (new_phase, pulse_width, i) ;
 }
 
 void BandLimitedWaveformTS::init_triangle_variable (uint32_t freq_word)
 {
-  // As init_pulse (50% width), but keeping the raw pulse and filling the triangle terms
-  phase_word = 0 ;
-  sampled_width = DEG180 ;
-  newptr = 0 ;
-  delptr = 0 ;
-  for (int i = 0 ; i < 2*SUPPORT ; i++)
-    phase_word -= freq_word ;
-  if (phase_word < sampled_width)
-  {
-    dc_offset = BASE_AMPLITUDE ;
-    pulse_state = true ;
-  }
-  else
-  {
-    dc_offset = -BASE_AMPLITUDE ;
-    pulse_state = false ;
-  }
-  for (int i = 0 ; i < 2*SUPPORT ; i++)
-  {
-    uint32_t new_phase = phase_word + freq_word ;
-    new_step_check_pulse (new_phase, DEG180, i) ;
-    cyclic [i & 15] = process_active_steps (new_phase) ;
-    tri_terms (new_phase, freq_word, i) ;
-    phase_word = new_phase ;
-  }
-  tri_y = tri_ref [0] ; // the first sample to come out
+  vt_inc = freq_word ;
+  vt_sync = true ; // set up on the first sample, when the real phase is known
 }
 
 BandLimitedWaveformTS::BandLimitedWaveformTS()
 {
-  newptr = 0 ;
-  delptr = 0 ;
+  if (!full_step_ready)
+    build_full_step () ;
+  vt_fpos = 0 ;
+  for (int k = 0 ; k < 32 ; k++)
+    vt_future [k] = 0.0f ;
+  vt_sync = true ;
+  vt_inc = 0 ;
+  reset_steps () ;
   dc_offset = BASE_AMPLITUDE ;
   phase_word = 0 ;
 }
