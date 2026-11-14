@@ -1138,6 +1138,17 @@ bool ST7735_t3::updateScreenAsync(bool update_cont)         // call to say updat
 // one transfer from the frame buffer itself, flushed from the cache first, and the display
 // thread polls the channel's done flag. No interrupts are involved.
 
+void ST7735_t3::setPanelVariant(bool invert, uint8_t madctl, uint16_t xstart, uint16_t ystart)
+{
+  beginSPITransaction();
+  writecommand(ST7735_MADCTL);
+  writedata_last(madctl);
+  endSPITransaction();
+  invertDisplay(invert);
+  _xstart = xstart;
+  _ystart = ystart;
+}
+
 bool ST7735_t3::oneShotUpdate(void)
 {
   if (!_use_fbtft || !_pspi || _oneshot_active || (_dma_state & ST77XX_DMA_ACTIVE))
