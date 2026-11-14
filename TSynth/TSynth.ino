@@ -53,6 +53,9 @@
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
 #include "ThreadSafety.h"
+
+// TSynth's audio code works with blocks of any multiple of 16 samples (64 or 128)
+static_assert(AUDIO_BLOCK_SAMPLES % 16 == 0 && AUDIO_BLOCK_SAMPLES >= 32, "AUDIO_BLOCK_SAMPLES must be a multiple of 16");
 #include "MidiCC.h"
 #include "SettingsService.h"
 #include "AudioPatching.h"
@@ -115,6 +118,8 @@ boolean firstPatchLoaded = false;
 float previousMillis = millis(); // For MIDI Clk Sync
 
 uint8_t count = 0;            // For MIDI Clk Sync
+uint32_t midiBeatCount = 0;      // beats since MIDI Start
+uint32_t midiLastBeatMicros = 0; // time of the last beat
 uint16_t patchNo = 1;         // Current patch no
 long earliestTime = millis(); // For voice allocation - initialise to now
 
@@ -225,6 +230,8 @@ FLASHMEM void setup()
   encCW = getEncoderDir();
   // Read Pick-up enable from EEPROM - experimental feature
   pickUp = getPickupEnable();
+  // Read note retrigger mode from EEPROM
+  groupvec[activeGroupIndex]->setSameVoiceRetrig(getSameVoiceRetrig());
   // Read bass enhance enable from EEPROM
   if (getBassEnhanceEnable())
     global.sgtl5000_1.enhanceBassEnable();
@@ -1044,6 +1051,7 @@ void myControlChange(byte channel, byte control, byte value)
       lfoTempoValue = LFOTEMPO[value];
       oscLFOTimeDivStr = LFOTEMPOSTR[value];
       rate = lfoSyncFreq * LFOTEMPO[value];
+      groupvec[activeGroupIndex]->setPitchLfoBeats(LFOTEMPO[value]);
     }
     else
     {
@@ -1075,6 +1083,7 @@ void myControlChange(byte channel, byte control, byte value)
       lfoTempoValue = LFOTEMPO[value];
       rate = lfoSyncFreq * LFOTEMPO[value];
       timeDivStr = LFOTEMPOSTR[value];
+      groupvec[activeGroupIndex]->setFilterLfoBeats(LFOTEMPO[value]);
     }
     else
     {
@@ -1176,6 +1185,9 @@ FLASHMEM void myMIDIClockStart()
   // rhythmic quantisation as Tempo Div.
 
   // TODO: Apply to all groupvec[activeGroupIndex]-> Maybe check channel?
+  count = 0;
+  midiBeatCount = 0;
+  midiLastBeatMicros = micros();
   groupvec[activeGroupIndex]->midiClockStart();
 }
 
@@ -1186,21 +1198,36 @@ FLASHMEM void myMIDIClockStop()
   setMIDIClkSignal(false);
 }
 
+// MIDI clock (24 per beat): the tempo is measured each beat (in microseconds, was
+// milliseconds) and synced LFOs are kept in phase with the beat count since Start.
+
+FLASHMEM float nearestLfoTempo(float cyclesPerBeat)
+{
+  float best = LFOTEMPO[0];
+  for (uint8_t i = 1; i < 128; i++)
+    if (fabsf(LFOTEMPO[i] - cyclesPerBeat) < fabsf(best - cyclesPerBeat))
+      best = LFOTEMPO[i];
+  return best;
+}
+
 void myMIDIClock()
 {
   if (midiDiscard)
     return;
-  // This recalculates the LFO frequencies if the tempo changes (MIDI cLock is 24ppq)
   if (count > 23)
   {
-    // TODO: Most of this needs to move into the VoiceGroup
-
     setMIDIClkSignal(!getMIDIClkSignal());
-    long timeNow = millis();
-    midiClkTimeInterval = (timeNow - previousMillis);
-    lfoSyncFreq = 1000.0f / midiClkTimeInterval;
-    previousMillis = timeNow;
-    groupvec[activeGroupIndex]->midiClock(lfoSyncFreq * lfoTempoValue);
+    const uint32_t now = micros();
+    const uint32_t beatMicros = now - midiLastBeatMicros;
+    const bool haveTempo = midiLastBeatMicros != 0 && beatMicros > 0 && beatMicros < 4000000; // 15bpm and up
+    midiLastBeatMicros = now;
+    midiBeatCount++;
+    if (haveTempo)
+    {
+      midiClkTimeInterval = beatMicros / 1000;
+      lfoSyncFreq = 1000000.0f / beatMicros;
+      groupvec[activeGroupIndex]->midiClockBeat(midiBeatCount, beatMicros * 0.000001f);
+    }
     count = 0;
   }
 
@@ -1236,7 +1263,7 @@ FLASHMEM void setCurrentPatchData(String data[])
   updateOscFX(data[5].toInt());
   updateDetune(data[6].toFloat(), data[48].toInt());
   // Why is this MIDI Clock stuff part of the patch??
-  lfoSyncFreq = data[7].toInt();
+  lfoSyncFreq = data[7].toFloat(); // was toInt(), which dropped the fraction (e.g. 1.67 -> 1)
   midiClkTimeInterval = data[8].toInt();
   lfoTempoValue = data[9].toFloat();
   updateKeyTracking(data[10].toFloat());
@@ -1261,6 +1288,9 @@ FLASHMEM void setCurrentPatchData(String data[])
   updateFilterLfoRate(data[31].toFloat(), "");
   updateFilterLFORetrig(data[32].toInt() > 0);
   updateFilterLFOMidiClkSync(data[33].toInt() > 0);
+  // Synced LFO divisions: only one tempo value is saved, so work each out from its rate
+  groupvec[activeGroupIndex]->setPitchLfoBeats(nearestLfoTempo(lfoSyncFreq > 0 ? data[27].toFloat() / lfoSyncFreq : lfoTempoValue));
+  groupvec[activeGroupIndex]->setFilterLfoBeats(nearestLfoTempo(lfoSyncFreq > 0 ? data[31].toFloat() / lfoSyncFreq : lfoTempoValue));
   updateFilterLfoAmt(data[34].toFloat());
   updateFilterLFOWaveform(data[35].toFloat());
   updateFilterAttack(data[36].toFloat());

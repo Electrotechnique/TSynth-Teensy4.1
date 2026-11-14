@@ -12,6 +12,8 @@ void settingsEncoderDir(int index, const char * value);
 void settingsPickupEnable(int index, const char * value);
 void settingsBassEnhanceEnable(int index, const char * value);
 void settingsScopeEnable(int index, const char * value);
+void settingsVoiceRetrig(int index, const char * value);
+int currentIndexVoiceRetrig();
 void settingsVUEnable(int index, const char * value);
 void settingsMonophonic(int index, const char * value);
 void settingsAmpEnv(int index, const char *value);
@@ -298,6 +300,16 @@ FLASHMEM int currentIndexScopeEnable() {
   return getScopeEnable() ? 1 : 0;
 }
 
+FLASHMEM void settingsVoiceRetrig(int index, const char * value) {
+  bool same = strcmp(value, "Same Voice") == 0;
+  groupvec[activeGroupIndex]->setSameVoiceRetrig(same);
+  storeSameVoiceRetrig(same ? 1 : 0);
+}
+
+FLASHMEM int currentIndexVoiceRetrig() {
+  return getSameVoiceRetrig() ? 1 : 0;
+}
+
 FLASHMEM int currentIndexVUEnable() {
   return getVUEnable() ? 1 : 0;
 }
@@ -308,6 +320,7 @@ FLASHMEM void setUpSettings() {
   settings::append(settings::SettingsOption{"Key Tracking", {"None", "Half", "Full", "\0"}, settingsKeyTracking, currentIndexKeyTracking});
   settings::append(settings::SettingsOption{"Vel. Sens.", {"Off", "1", "2", "3", "4", "\0"}, settingsVelocitySens, currentIndexVelocitySens});
   settings::append(settings::SettingsOption{"Monophonic", {"Off", "Last", "First", "Highest", "Lowest"/* , "Legato"*/, "\0"}, settingsMonophonic, currentIndexMonophonicMode});
+  settings::append(settings::SettingsOption{"Retrigger", {"Rotate", "Same Voice", "\0"}, settingsVoiceRetrig, currentIndexVoiceRetrig});
   settings::append(settings::SettingsOption{"Pitch Bend", {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "\0"}, settingsPitchBend, currentIndexPitchBend});
   settings::append(settings::SettingsOption{"MW Depth", {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "\0"}, settingsModWheelDepth, currentIndexModWheelDepth});
   settings::append(settings::SettingsOption{"MIDI Out Ch.", {"Off", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "\0"}, settingsMIDIOutCh, currentIndexMIDIOutCh});

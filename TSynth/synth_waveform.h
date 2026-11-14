@@ -169,6 +169,19 @@ public:
   void sync() {
     syncFlag = 1;
   }       
+  // Phase in cycles (0 to <1) at the start of the last block, and a phase to jump to at
+  // the start of the next one (used to lock MIDI clock synced LFOs to the beat)
+  float getPhase() { return (uint32_t)(phase_accumulator + phase_offset) * (1.0f / 4294967296.0f); }
+  void setPhase(float cycles) {
+    cycles -= floorf(cycles);
+    pendingPhase = (uint32_t)(cycles * 4294967296.0f) - phase_offset;
+    phaseSetFlag = 1;
+  }
+  // Round off the jumps of square, pulse, saw and sample & hold waveforms over about
+  // this many milliseconds (one-pole), so an LFO doesn't click. 0 = off.
+  void smoothing(float ms) {
+    smooth_k = ms > 0.0f ? 1.0f - expf(-1000.0f / (ms * AUDIO_SAMPLE_RATE_EXACT)) : 0.0f;
+  }
   void amplitude(float n) { // 0 to 1.0
     if (n < 0) {
       n = 0;
@@ -226,6 +239,11 @@ private:
   int16_t  tone_offset;
     int16_t   syncFlag;
         BandLimitedWaveformTS band_limit_waveform ;
+        volatile uint32_t pendingPhase = 0;
+        volatile uint8_t phaseSetFlag = 0;
+        float smooth_k = 0.0f;  // smoothing coefficient, 0 = off
+        float smooth_y = 0.0f;
+        bool smooth_started = false;
 };
 
 

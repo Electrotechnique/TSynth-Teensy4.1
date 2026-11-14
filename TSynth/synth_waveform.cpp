@@ -51,6 +51,10 @@ void AudioSynthWaveformTS::update(void)
     phase_accumulator = 0;
     syncFlag = 0;
   }                      
+  if (phaseSetFlag) {
+    phase_accumulator = pendingPhase;
+    phaseSetFlag = 0;
+  }
   ph = phase_accumulator + phase_offset;
   if (magnitude == 0) {
     phase_accumulator += inc * AUDIO_BLOCK_SAMPLES;
@@ -214,6 +218,23 @@ void AudioSynthWaveformTS::update(void)
     break;
   }
   phase_accumulator = ph - phase_offset;
+
+  // Smooth the jumps of the stepped waveforms (LFO use)
+  if (smooth_k > 0.0f && (tone_type == WAVEFORM_SQUARE || tone_type == WAVEFORM_PULSE ||
+      tone_type == WAVEFORM_SAWTOOTH || tone_type == WAVEFORM_SAWTOOTH_REVERSE ||
+      tone_type == WAVEFORM_SAMPLE_HOLD)) {
+    bp = block->data;
+    float y = smooth_started ? smooth_y : bp[0];
+    const float k = smooth_k;
+    for (i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+      y += k * (bp[i] - y);
+      bp[i] = (int16_t)y;
+    }
+    smooth_y = y;
+    smooth_started = true;
+  } else {
+    smooth_started = false;
+  }
 
   if (tone_offset) {
     bp = block->data;

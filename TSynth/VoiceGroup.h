@@ -22,6 +22,8 @@
 // mixer and the clipped edges alias badly.
 #define OSCMIX_MAX_SUM 1.0f
 
+#define LFO_SMOOTH_MS 1.0f // smoothing of stepped LFO waveforms
+
 #define MONOPHONIC_OFF 0
 #define MONOPHONIC_LAST 1
 #define MONOPHONIC_FIRST 2
@@ -88,6 +90,9 @@ private:
     float whiteLevel;
     uint8_t pitchLfoWaveform;
     bool pitchLfoRetrig;
+    bool sameVoiceRetrig = false;
+    float pitchLfoBeats = 1.0f;  // MIDI clock synced divisions, LFO cycles per beat
+    float filterLfoBeats = 1.0f;
     float pitchLfoAmount;
     float pitchLfoRate;
     float modWhAmount;
@@ -165,6 +170,12 @@ public:
         shared.pwmLfoB.amplitude(ONE);
         shared.pwmLfoB.begin(PWMWAVEFORM);
         shared.pwmLfoB.phase(10.0f); //Off set phase of second osc
+
+        // Round off the jumps of square, saw and sample & hold LFOs so they don't click
+        shared.pitchLfo.smoothing(LFO_SMOOTH_MS);
+        shared.filterLfo.smoothing(LFO_SMOOTH_MS);
+        shared.pwmLfoA.smoothing(LFO_SMOOTH_MS);
+        shared.pwmLfoB.smoothing(LFO_SMOOTH_MS);
 
         setEffectAmount(effectAmount);
         setEffectMix(effectMix);
@@ -833,6 +844,8 @@ public:
         shared.effectMixerR.gain(1, effectMix);        //Wet
     }
 
+    void setSameVoiceRetrig(bool same) { sameVoiceRetrig = same; }
+
     inline void setMonophonic(uint8_t mode)
     {
         if (mode != this->monophonic)
@@ -1013,7 +1026,53 @@ public:
     void midiClockStart()
     {
         midiClockSignal = true;
-        shared.filterLfo.sync();
+        // Start of the song: synced LFOs start their cycle on the first beat
+        if (filterLfoMidiClockSync)
+            shared.filterLfo.setPhase(0.0f);
+        if (pitchLFOMidiClockSync)
+            shared.pitchLfo.setPhase(0.0f);
+    }
+
+    // MIDI clock synced LFO divisions, in LFO cycles per beat (LFOTEMPO values)
+    void setPitchLfoBeats(float cyclesPerBeat) { pitchLfoBeats = cyclesPerBeat; }
+    void setFilterLfoBeats(float cyclesPerBeat) { filterLfoBeats = cyclesPerBeat; }
+
+    // Called on every MIDI clock beat (24 clocks). Sets synced LFOs to the tempo and keeps
+    // them in phase with the beat: the phase error is taken out over the next beat by
+    // adjusting the rate (no jump), or by setting the phase if it is far out. Previously
+    // only the rate was set, so a synced LFO slowly drifted against the music.
+    void midiClockBeat(uint32_t beat, float beatSeconds)
+    {
+        midiClockSignal = true;
+        if (filterLfoMidiClockSync)
+            lockLfo(shared.filterLfo, filterLfoBeats, beat, beatSeconds, filterLfoRetrig);
+        if (pitchLFOMidiClockSync)
+            lockLfo(shared.pitchLfo, pitchLfoBeats, beat, beatSeconds, pitchLfoRetrig);
+    }
+
+    static void lockLfo(AudioSynthWaveformTS &lfo, float cyclesPerBeat, uint32_t beat, float beatSeconds, bool retrig)
+    {
+        if (beatSeconds <= 0.0f)
+            return;
+        const float rate = cyclesPerBeat / beatSeconds;
+        if (retrig)
+        {
+            // Restarted by notes, so not locked to the beat
+            lfo.frequency(rate);
+            return;
+        }
+        const double target = (double)beat * cyclesPerBeat;
+        float error = (float)(target - floor(target)) - lfo.getPhase();
+        error -= roundf(error); // -0.5 .. 0.5 of a cycle
+        if (fabsf(error) > 0.25f)
+        {
+            lfo.setPhase((float)(target - floor(target)));
+            lfo.frequency(rate);
+        }
+        else
+        {
+            lfo.frequency(rate + error / beatSeconds);
+        }
     }
 
     void midiClockStop()
@@ -1021,20 +1080,7 @@ public:
         midiClockSignal = false;
     }
 
-    void midiClock(float frequency)
-    {
-        midiClockSignal = true;
 
-        if (filterLfoMidiClockSync)
-        {
-            shared.filterLfo.frequency(frequency);
-        }
-
-        if (pitchLFOMidiClockSync)
-        {
-            shared.pitchLfo.frequency(frequency);
-        }
-    }
 
     void closeEnvelopes()
     {
@@ -1142,8 +1188,17 @@ private:
     // Get the oldest free voice, of none free get the oldest active voice.
     // Prefer a silent voice, then the oldest released voice (still in its release tail),
     // then steal the oldest held note. Using silent voices first avoids cutting off release tails.
-    Voice *getVoice()
+    // Note retrigger option (setSameVoiceRetrig): reuse the voice of a note that is played
+    // again while still sounding (held or releasing), instead of taking another voice
+    Voice *getVoice(uint8_t note)
     {
+        if (sameVoiceRetrig && !this->monophonic)
+        {
+            for (uint8_t i = 0; i < voices.size(); i++)
+                if (voices[i]->note() == note && (voices[i]->on() || voices[i]->sounding()))
+                    return voices[i];
+        }
+
         // Mono modes retrigger the same voice rather than overlapping the previous note's release
         if (this->monophonic)
         {
@@ -1205,7 +1260,7 @@ private:
         case 0:
         {
             this->_params.mixerLevel = VOICEMIXERLEVEL * oscMixCompensation;
-            Voice *v = this->getVoice();
+            Voice *v = this->getVoice(note);
             if (!v->on())
                 this->voicesOn++;
             v->noteOn(note, velocity, this->_params, unisonNotesOn, 0);

@@ -13,6 +13,7 @@
 #define EEPROM_AMP_ENV 10
 #define EEPROM_FILT_ENV 11
 #define EEPROM_GLIDE_SHAPE 12
+#define EEPROM_VOICE_RETRIG 13
 
 FLASHMEM void storeGlideShape(byte type){
   EEPROM.update(EEPROM_GLIDE_SHAPE, type);
@@ -133,6 +134,16 @@ FLASHMEM boolean getScopeEnable() {
 
 FLASHMEM void storeScopeEnable(byte ScopeEnable){
   EEPROM.update(EEPROM_SCOPE_ENABLE, ScopeEnable);
+}
+
+// Note retrigger: false = rotate voices (default), true = a note played again while it is
+// still sounding reuses its voice
+FLASHMEM boolean getSameVoiceRetrig() {
+  byte v = EEPROM.read(EEPROM_VOICE_RETRIG);
+  return v == 1;
+}
+FLASHMEM void storeSameVoiceRetrig(byte value){
+  EEPROM.update(EEPROM_VOICE_RETRIG, value);
 }
 
 FLASHMEM boolean getVUEnable() {
