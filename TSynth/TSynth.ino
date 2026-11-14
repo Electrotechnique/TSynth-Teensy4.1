@@ -1,7 +1,7 @@
 /*
    MIT License
 
-  Copyright (c) 2020-21 ElectroTechnique
+  Copyright (c) 2020-26 ElectroTechnique
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -40,6 +40,8 @@
     Vince R. Pearson - Exponential envelopes & glide
     Github members fab672000 & CDW2000 - General improvements to code
     Mark Tillotson - Special thanks for band-limiting the waveforms in the Audio Library
+
+    Caude Code Opus 5.5 - Extensive fixes and some rewrites  https://github.com/Electrotechnique/TSynth-Teensy4.1/pull/143
 
   Additional libraries:
     Agileware CircularBuffer, Adafruit_GFX (available in Arduino libraries manager)
