@@ -487,9 +487,13 @@ float scopePeriodSamples()
   return AUDIO_SAMPLE_RATE_EXACT / freq;
 }
 
-void updateScreenDMA() {
-  global.scope.setPeriod(scopePeriodSamples());
-  global.scope.Display(); // Draws only if the scope is enabled
+// drawScope: only on the main patch page (patch number, name and voice grid), not on
+// parameter, menu, save/recall or settings pages
+void updateScreenDMA(bool drawScope) {
+  if (drawScope) {
+    global.scope.setPeriod(scopePeriodSamples());
+    global.scope.Display(); // Draws only if the scope is enabled
+  }
   // One DMA transfer for the whole frame (~14ms), polled. See ST7735_t3::oneShotUpdate().
   if (tft.oneShotUpdate()) {
     elapsedMillis wait;
@@ -513,6 +517,7 @@ void displayThread() {
   while (1) {
     frameTime = 0;
     bool reinitPause = false;
+    bool mainPage = false; // the patch page, the only one with the oscilloscope
     if (pendingDisplayVariant >= 0) {
       applyDisplayVariant(pendingDisplayVariant);
       pendingDisplayVariant = -1;
@@ -525,6 +530,7 @@ void displayThread() {
         if ((millis() - timer) > DISPLAYTIMEOUT) {
           pickUpActive = false;
           renderCurrentPatchPage();
+          mainPage = true;
         } else {
           pickUpActive = pickUp;
           renderCurrentParameterPage();
@@ -545,6 +551,7 @@ void displayThread() {
         break;
       case PATCH:
         renderCurrentPatchPage();
+        mainPage = true;
         break;
       case DELETE:
         renderDeletePatchPage();
@@ -558,7 +565,7 @@ void displayThread() {
         break;
     }
     displayLock.unlock();
-    updateScreenDMA();
+    updateScreenDMA(mainPage);
     if (reinitPause) {
       threads.delay(1000);
       state = PARAMETER;
