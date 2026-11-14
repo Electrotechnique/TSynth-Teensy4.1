@@ -94,6 +94,7 @@ FLASHMEM void sortPatches(){
 }
 
 FLASHMEM void loadPatches(){
+  LockGuard lock(displayLock); // The display renders from the patch list
   File file = SD.open("/");
   patches.clear();
   while (true)

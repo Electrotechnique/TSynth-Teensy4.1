@@ -17,6 +17,13 @@
     }
 
 // These are here because of a Settings.h circular dependency.
+// Maximum combined gain of Osc 1 + Osc 2 + XOR into the waveform mixer.
+// Band-limited squares peak at ~0.95 FS, so a higher total clips the 16-bit
+// mixer and the clipped edges alias badly.
+#define OSCMIX_MAX_SUM 1.0f
+
+#define LFO_SMOOTH_MS 1.0f // smoothing of stepped LFO waveforms
+
 #define MONOPHONIC_OFF 0
 #define MONOPHONIC_LAST 1
 #define MONOPHONIC_FIRST 2
@@ -60,6 +67,9 @@ private:
     uint8_t oscFX;
     float oscLevelA;
     float oscLevelB;
+    float waveformLevels[4] = {1.0f, 1.0f, 1.0f, 0.0f}; // Requested waveform mixer levels (before headroom scaling)
+    float noiseContribution = 0.0f;                      // Noise level feeding waveform mixer channel 2
+    float oscMixCompensation = 1.0f;                     // Restores loudness lost to headroom scaling, applied after the filter
     float cutoff;
     float resonance;
     float filterMixer;
@@ -80,6 +90,9 @@ private:
     float whiteLevel;
     uint8_t pitchLfoWaveform;
     bool pitchLfoRetrig;
+    bool sameVoiceRetrig = false;
+    float pitchLfoBeats = 1.0f;  // MIDI clock synced divisions, LFO cycles per beat
+    float filterLfoBeats = 1.0f;
     float pitchLfoAmount;
     float pitchLfoRate;
     float modWhAmount;
@@ -138,6 +151,7 @@ public:
                                        effectMix(0.0)
     {
         _params.keytrackingAmount = 0.5; //Half - MIDI CC & settings option
+        _params.filterOctave = 4.0f;
         _params.mixerLevel = 0.0;
         _params.prevNote = 48;
         _params.glideSpeed = 0.0;
@@ -156,6 +170,12 @@ public:
         shared.pwmLfoB.amplitude(ONE);
         shared.pwmLfoB.begin(PWMWAVEFORM);
         shared.pwmLfoB.phase(10.0f); //Off set phase of second osc
+
+        // Round off the jumps of square, saw and sample & hold LFOs so they don't click
+        shared.pitchLfo.smoothing(LFO_SMOOTH_MS);
+        shared.filterLfo.smoothing(LFO_SMOOTH_MS);
+        shared.pwmLfoA.smoothing(LFO_SMOOTH_MS);
+        shared.pwmLfoB.smoothing(LFO_SMOOTH_MS);
 
         setEffectAmount(effectAmount);
         setEffectMix(effectMix);
@@ -448,7 +468,34 @@ public:
 
     void setWaveformMixerLevel(int channel, float level)
     {
-        VG_FOR_EACH_OSC(waveformMixer_.gain(channel, level))
+        waveformLevels[channel] = level;
+        applyWaveformMixerLevels();
+    }
+
+    // Scale the oscillator and noise channels together so their sum can't clip the mixer
+    void applyWaveformMixerLevels()
+    {
+        float sum = waveformLevels[0] + waveformLevels[1] + waveformLevels[3] + waveformLevels[2] * noiseContribution;
+        float scale = sum > OSCMIX_MAX_SUM ? OSCMIX_MAX_SUM / sum : 1.0f;
+        // Uncorrelated sources add by power, so compensate by sqrt to keep perceived level
+        oscMixCompensation = 1.0f / sqrtf(scale);
+        VG_FOR_EACH_OSC(waveformMixer_.gain(0, waveformLevels[0] * scale))
+        VG_FOR_EACH_OSC(waveformMixer_.gain(1, waveformLevels[1] * scale))
+        VG_FOR_EACH_OSC(waveformMixer_.gain(2, waveformLevels[2] * scale))
+        VG_FOR_EACH_OSC(waveformMixer_.gain(3, waveformLevels[3] * scale))
+    }
+
+    void updateNoiseContribution(float gain)
+    {
+        noiseContribution = (pinkLevel + whiteLevel) * gain;
+        applyWaveformMixerLevels();
+    }
+
+    // Call regularly from the main loop: starts note-ons deferred for stolen voices
+    void serviceVoices()
+    {
+        for (uint8_t i = 0; i < voices.size(); i++)
+            voices[i]->service();
     }
 
     void setOscModMixerA(int channel, float level)
@@ -587,6 +634,10 @@ public:
         }
 
         VG_FOR_EACH_OSC(filter_.octaveControl(filterOctave))
+
+        // Key tracking depends on the octave range, keep held notes in step
+        _params.filterOctave = filterOctave;
+        VG_FOR_EACH_VOICE(voices[i]->updateKeytracking(_params))
     }
 
     void setResonance(float value)
@@ -603,25 +654,30 @@ public:
         float BP = 0;
         float HP = 0;
 
-        if (value == BANDPASS)
+        if (value == BANDPASS || value >= 2.0f)
         {
-            //BP mode
+            // Bandpass
             LP = 0;
             BP = 1.0f;
             HP = 0;
         }
+        else if (value > 1.0f)
+        {
+            // Highpass fading into bandpass (top of the knob)
+            LP = 0;
+            BP = value - 1.0f;
+            HP = 1.0f - BP;
+        }
         else
         {
-            //LP-HP mix mode - a notch filter
-            LP = 1.0f - value;
-            BP = 0;
-            HP = value;
+            // LP-HP mix at constant level: from LP the highs come in until a full level notch
+            // at the middle (LP + HP), then the lows go out to HP. (A plain crossfade was 6dB
+            // down at the middle.)
+            LP = value < 0.5f ? 1.0f : 2.0f * (1.0f - value);
+            HP = value > 0.5f ? 1.0f : 2.0f * value;
         }
 
-        VG_FOR_EACH_VOICE(
-            voices[i]->patch().filterMixer_.gain(0, LP);
-            voices[i]->patch().filterMixer_.gain(1, BP);
-            voices[i]->patch().filterMixer_.gain(2, HP);)
+        VG_FOR_EACH_OSC(filter_.mix(LP, BP, HP))
     }
 
     void setFilterModMixer(int channel, float level)
@@ -687,7 +743,8 @@ public:
     {
         // TODO: Move this out of params to avoid setting it directly without updating the mixer.
         _params.keytrackingAmount = value;
-        setFilterModMixer(2, value);
+        setFilterModMixer(2, 1.0f); // The amount is applied in the per-voice DC level, not here as well
+        VG_FOR_EACH_VOICE(voices[i]->updateKeytracking(_params))
     }
 
     void setFilterLfoRetrig(bool value)
@@ -725,6 +782,7 @@ public:
         else
             gain = UNISONNOISEMIXERLEVEL;
         shared.noiseMixer.gain(0, pinkLevel * gain);
+        updateNoiseContribution(gain);
     }
 
     void setWhiteNoiseLevel(float value)
@@ -736,6 +794,7 @@ public:
         else
             gain = UNISONNOISEMIXERLEVEL;
         shared.noiseMixer.gain(1, whiteLevel * gain);
+        updateNoiseContribution(gain);
     }
 
     void setPitchLfoRetrig(bool value)
@@ -784,6 +843,8 @@ public:
         shared.effectMixerR.gain(0, 1.0f - effectMix); //Dry
         shared.effectMixerR.gain(1, effectMix);        //Wet
     }
+
+    void setSameVoiceRetrig(bool same) { sameVoiceRetrig = same; }
 
     inline void setMonophonic(uint8_t mode)
     {
@@ -888,6 +949,41 @@ public:
         {
             voices[i]->noteOff();
         }
+        // Keep the voice count and mono note history in step, or unison voice allocation
+        // and mono retriggering work from stale notes
+        this->voicesOn = 0;
+        noteStack.clear();
+    }
+
+    // Audio CPU overload (called from the audio interrupt): silence one voice to bring the
+    // load down - a voice still in its release tail if there is one, else the oldest held note
+    void shedVoice()
+    {
+        Voice *victim = nullptr;
+        for (uint8_t i = 0; i < voices.size(); i++)
+        {
+            Voice *v = voices[i];
+            if (!v->on() && v->sounding() && (victim == nullptr || v->timeOn() < victim->timeOn()))
+                victim = v;
+        }
+        if (victim == nullptr)
+        {
+            for (uint8_t i = 0; i < voices.size(); i++)
+            {
+                Voice *v = voices[i];
+                if (v->on() && (victim == nullptr || v->timeOn() < victim->timeOn()))
+                    victim = v;
+            }
+        }
+        if (victim != nullptr && victim->forceSilence() && this->voicesOn > 0)
+            this->voicesOn--;
+    }
+
+    // Silence everything at once: notes off and envelopes closed
+    void panic()
+    {
+        allNotesOff();
+        closeEnvelopes();
     }
 
     void updateVoices()
@@ -930,7 +1026,53 @@ public:
     void midiClockStart()
     {
         midiClockSignal = true;
-        shared.filterLfo.sync();
+        // Start of the song: synced LFOs start their cycle on the first beat
+        if (filterLfoMidiClockSync)
+            shared.filterLfo.setPhase(0.0f);
+        if (pitchLFOMidiClockSync)
+            shared.pitchLfo.setPhase(0.0f);
+    }
+
+    // MIDI clock synced LFO divisions, in LFO cycles per beat (LFOTEMPO values)
+    void setPitchLfoBeats(float cyclesPerBeat) { pitchLfoBeats = cyclesPerBeat; }
+    void setFilterLfoBeats(float cyclesPerBeat) { filterLfoBeats = cyclesPerBeat; }
+
+    // Called on every MIDI clock beat (24 clocks). Sets synced LFOs to the tempo and keeps
+    // them in phase with the beat: the phase error is taken out over the next beat by
+    // adjusting the rate (no jump), or by setting the phase if it is far out. Previously
+    // only the rate was set, so a synced LFO slowly drifted against the music.
+    void midiClockBeat(uint32_t beat, float beatSeconds)
+    {
+        midiClockSignal = true;
+        if (filterLfoMidiClockSync)
+            lockLfo(shared.filterLfo, filterLfoBeats, beat, beatSeconds, filterLfoRetrig);
+        if (pitchLFOMidiClockSync)
+            lockLfo(shared.pitchLfo, pitchLfoBeats, beat, beatSeconds, pitchLfoRetrig);
+    }
+
+    static void lockLfo(AudioSynthWaveformTS &lfo, float cyclesPerBeat, uint32_t beat, float beatSeconds, bool retrig)
+    {
+        if (beatSeconds <= 0.0f)
+            return;
+        const float rate = cyclesPerBeat / beatSeconds;
+        if (retrig)
+        {
+            // Restarted by notes, so not locked to the beat
+            lfo.frequency(rate);
+            return;
+        }
+        const double target = (double)beat * cyclesPerBeat;
+        float error = (float)(target - floor(target)) - lfo.getPhase();
+        error -= roundf(error); // -0.5 .. 0.5 of a cycle
+        if (fabsf(error) > 0.25f)
+        {
+            lfo.setPhase((float)(target - floor(target)));
+            lfo.frequency(rate);
+        }
+        else
+        {
+            lfo.frequency(rate + error / beatSeconds);
+        }
     }
 
     void midiClockStop()
@@ -938,20 +1080,7 @@ public:
         midiClockSignal = false;
     }
 
-    void midiClock(float frequency)
-    {
-        midiClockSignal = true;
 
-        if (filterLfoMidiClockSync)
-        {
-            shared.filterLfo.frequency(frequency);
-        }
-
-        if (pitchLFOMidiClockSync)
-        {
-            shared.pitchLfo.frequency(frequency);
-        }
-    }
 
     void closeEnvelopes()
     {
@@ -1057,31 +1186,45 @@ private:
     }
 
     // Get the oldest free voice, of none free get the oldest active voice.
-    Voice *getVoice()
+    // Prefer a silent voice, then the oldest released voice (still in its release tail),
+    // then steal the oldest held note. Using silent voices first avoids cutting off release tails.
+    // Note retrigger option (setSameVoiceRetrig): reuse the voice of a note that is played
+    // again while still sounding (held or releasing), instead of taking another voice
+    Voice *getVoice(uint8_t note)
     {
-        Voice *result = nullptr;
-
-        // Find free voice
-        for (uint8_t i = 0; i < voices.size(); i++)
+        if (sameVoiceRetrig && !this->monophonic)
         {
-            if (!voices[i]->on())
-            {
-                result = voices[i];
-                break;
-            }
+            for (uint8_t i = 0; i < voices.size(); i++)
+                if (voices[i]->note() == note && (voices[i]->on() || voices[i]->sounding()))
+                    return voices[i];
         }
 
+        // Mono modes retrigger the same voice rather than overlapping the previous note's release
+        if (this->monophonic)
+        {
+            for (uint8_t i = 0; i < voices.size(); i++)
+                if (!voices[i]->on())
+                    return voices[i];
+        }
+
+        Voice *released = nullptr;
+        Voice *oldest = nullptr;
         for (uint8_t i = 0; i < voices.size(); i++)
         {
-            if (result == nullptr || !voices[i]->on() || result->on())
+            Voice *v = voices[i];
+            if (!v->on())
             {
-                if (result == nullptr || voices[i]->timeOn() < result->timeOn())
-                {
-                    result = voices[i];
-                }
+                if (!v->sounding())
+                    return v;
+                if (released == nullptr || v->timeOn() < released->timeOn())
+                    released = v;
+            }
+            else if (oldest == nullptr || v->timeOn() < oldest->timeOn())
+            {
+                oldest = v;
             }
         }
-        return result;
+        return released != nullptr ? released : oldest;
     }
 
     // Turn off one or more notes, return the number of notes turned off.
@@ -1116,8 +1259,8 @@ private:
         {
         case 0:
         {
-            this->_params.mixerLevel = VOICEMIXERLEVEL;
-            Voice *v = this->getVoice();
+            this->_params.mixerLevel = VOICEMIXERLEVEL * oscMixCompensation;
+            Voice *v = this->getVoice(note);
             if (!v->on())
                 this->voicesOn++;
             v->noteOn(note, velocity, this->_params, unisonNotesOn, 0);
@@ -1128,7 +1271,7 @@ private:
             if (!this->monophonic)
                 this->unisonNotesOn++;
 
-            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL;
+            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL * oscMixCompensation;
 
             uint8_t maxUnison = voices.size() / MINUNISONVOICES;
             uint8_t tally[maxUnison] = {};
@@ -1195,7 +1338,7 @@ private:
             break;
         }
         case 2:
-            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL;
+            this->_params.mixerLevel = UNISONVOICEMIXERLEVEL * oscMixCompensation;
             allNotesOn(note, velocity, 0);
             break;
         }

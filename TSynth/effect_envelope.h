@@ -77,6 +77,24 @@ public:
   }
   void noteOn();
   void noteOff();
+  // Like noteOn(), but after the forced release (or straight away if idle) the envelope
+  // waits silently instead of starting the attack, until start() is called. Lets a stolen
+  // voice change pitch and level only once the old note has faded out.
+  void noteOnDeferred() {
+    __disable_irq();
+    hold_after_forced = true;
+    __enable_irq();
+    noteOn();
+  }
+  bool isWaiting() { return *(volatile uint8_t *)&state == STATE_WAIT; }
+  void start() {
+    __disable_irq();
+    hold_after_forced = false;
+    if (state == STATE_WAIT)
+      state = STATE_IDLE;
+    __enable_irq();
+    noteOn();
+  }
   FLASHMEM void delay(float milliseconds) {
     delay_count = milliseconds2count(milliseconds); // Number of samples is 8 times this number for linear mode.
     __disable_irq();
@@ -143,6 +161,7 @@ FLASHMEM void close(){
      inc_hires = 0;//Same as STATE_DELAY
      state=STATE_IDLE; // Added, VRP. Shouldn't this be in the idle state when closed?
      ysum=0;
+     hold_after_forced = false; // otherwise the next noteOn would wait for a start() that never comes
   __enable_irq();
 }
   bool isActive();
@@ -230,7 +249,9 @@ private:
     STATE_RELEASE,
     STATE_FORCED,
     STATE_IDLE_NEXT,  // Not used for original linear envelope.
+    STATE_WAIT,       // Forced release done, silent until start() (see noteOnDeferred)
     };
+  volatile bool hold_after_forced = false;
  // Exponential ADSR variables
   int8_t env_type; // Attack curve type. Limit to -8 to 8 integers for exp curve, -128 for linear.
   uint32_t exp_count; // same function as count in linear generator but for single samples, not groups of 8.

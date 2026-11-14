@@ -21,7 +21,7 @@
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
 
-  ElectroTechnique TSynth - Firmware Rev 2.33
+  ElectroTechnique TSynth - Firmware Rev 3.00
   TEENSY 4.1 - 12 VOICES
 
   Arduino IDE Tools Settings:
@@ -52,6 +52,10 @@
 #include <MIDI.h>
 #include <USBHost_t36.h>
 #include <TeensyThreads.h>
+#include "ThreadSafety.h"
+
+// TSynth's audio code works with blocks of any multiple of 16 samples (64 or 128)
+static_assert(AUDIO_BLOCK_SAMPLES % 16 == 0 && AUDIO_BLOCK_SAMPLES >= 32, "AUDIO_BLOCK_SAMPLES must be a multiple of 16");
 #include "MidiCC.h"
 #include "SettingsService.h"
 #include "AudioPatching.h"
@@ -84,6 +88,7 @@ Global global{VOICEMIXERLEVEL};
 std::vector<VoiceGroup *> groupvec;
 uint8_t activeGroupIndex = 0;
 uint8_t loopCount = 0;
+#define MIDI_READS_PER_LOOP 16
 
 boolean usbHostPluggedIn = false;
 elapsedMillis usb_host_wait_timer;
@@ -113,6 +118,8 @@ boolean firstPatchLoaded = false;
 float previousMillis = millis(); // For MIDI Clk Sync
 
 uint8_t count = 0;            // For MIDI Clk Sync
+uint32_t midiBeatCount = 0;      // beats since MIDI Start
+uint32_t midiLastBeatMicros = 0; // time of the last beat
 uint16_t patchNo = 1;         // Current patch no
 long earliestTime = millis(); // For voice allocation - initialise to now
 
@@ -223,6 +230,8 @@ FLASHMEM void setup()
   encCW = getEncoderDir();
   // Read Pick-up enable from EEPROM - experimental feature
   pickUp = getPickupEnable();
+  // Read note retrigger mode from EEPROM
+  groupvec[activeGroupIndex]->setSameVoiceRetrig(getSameVoiceRetrig());
   // Read bass enhance enable from EEPROM
   if (getBassEnhanceEnable())
     global.sgtl5000_1.enhanceBassEnable();
@@ -234,20 +243,35 @@ FLASHMEM void setup()
   reloadFiltEnv();
   reloadAmpEnv();
   reloadGlideShape();
+
+  // If the audio processing ever overruns, drop a voice rather than hang
+  global.cpuGuard.onOverload = []() { groupvec[activeGroupIndex]->shedVoice(); };
 }
+
+// Set while flushing MIDI input on Panic: incoming messages are read and dropped
+volatile boolean midiDiscard = false;
 
 void myNoteOn(byte channel, byte note, byte velocity)
 {
+  if (midiDiscard)
+    return;
   // Check for out of range notes
   if (note + groupvec[activeGroupIndex]->params().oscPitchA < 0 || note + groupvec[activeGroupIndex]->params().oscPitchA > 127 || note + groupvec[activeGroupIndex]->params().oscPitchB < 0 || note + groupvec[activeGroupIndex]->params().oscPitchB > 127)
     return;
 
+  // Apply envelope triggers and pitch changes within the same audio block
+  AudioNoInterrupts();
   groupvec[activeGroupIndex]->noteOn(note, velocity);
+  AudioInterrupts();
 }
 
 void myNoteOff(byte channel, byte note, byte velocity)
 {
+  if (midiDiscard)
+    return;
+  AudioNoInterrupts();
   groupvec[activeGroupIndex]->noteOff(note);
+  AudioInterrupts();
 }
 
 int getLFOWaveform(int value)
@@ -409,9 +433,31 @@ FLASHMEM void updateUnison(uint8_t unison)
   }
 }
 
+// Volume knob taper. The SGTL5000 headphone volume moves in 0.5dB steps, so mapping the knob
+// straight onto it (as before) was linear in dB across ~64dB: half way was 29dB down, about
+// an eighth as loud. This is an audio taper (amplitude = knob^2): half way is -12dB, about
+// half as loud, quarter way -24dB. The maximum is unchanged.
+#define VOLUME_MAX_DB 6.0f    // codec headphone gain at full volume (as with volume 0.9 before)
+#define VOLUME_TAPER_DB 40.0f // dB per decade of knob travel
+
+FLASHMEM void setOutputVolume(float vol)
+{
+  // Headphone volume register: 0x00 = +12dB ... 0x7F = -51.5dB; volume(n) writes 0x80 - n*129
+  float reg = vol > 0.0f ? (12.0f - (VOLUME_MAX_DB + VOLUME_TAPER_DB * log10f(vol))) * 2.0f : 1000.0f;
+  if (reg > 127.0f)
+  {
+    global.sgtl5000_1.volume(0.0f); // below the codec's range: mute
+    return;
+  }
+  if (reg < 0.0f)
+    reg = 0.0f;
+  int n = 128 - (int)(reg + 0.5f);
+  global.sgtl5000_1.volume(n / 129.0f);
+}
+
 FLASHMEM void updateVolume(float vol)
 {
-  global.sgtl5000_1.volume(vol * SGTL_MAXVOLUME);
+  setOutputVolume(vol);
   showCurrentParameterPage(F("Volume"), vol);
 }
 
@@ -655,9 +701,13 @@ FLASHMEM void updateFilterMixer(float value)
   groupvec[activeGroupIndex]->setFilterMixer(value);
 
   String filterStr;
-  if (value == BANDPASS)
+  if (value == BANDPASS || value >= 2.0f)
   {
     filterStr = F("Band Pass");
+  }
+  else if (value > 1.0f)
+  {
+    filterStr = F("HP ") + String(100 - int(100 * (value - 1.0f) + 0.5f)) + F(" - ") + String(int(100 * (value - 1.0f) + 0.5f)) + F(" BP");
   }
   else
   {
@@ -866,12 +916,24 @@ FLASHMEM void updatePatch(String name, uint32_t index)
 
 void myPitchBend(byte channel, int bend)
 {
+  if (midiDiscard)
+    return;
   // 0.5 to give 1oct max - spread of mod is 2oct
   groupvec[activeGroupIndex]->pitchBend(bend * 0.5f * pitchBendRange * DIV12 * DIV8192);
 }
 
+#include "PickUp.h"
+
 void myControlChange(byte channel, byte control, byte value)
 {
+  if (midiDiscard)
+    return;
+  if (!controlFromPanel)
+  {
+    // Changed by MIDI: the knob no longer matches, so it has to pick up again. MIDI is never gated.
+    pickupRearmCC(control);
+    pickupDirection = 0;
+  }
   switch (control)
   {
   case CCvolume:
@@ -945,32 +1007,20 @@ void myControlChange(byte channel, byte control, byte value)
     break;
 
   case CCfilterfreq:
-    // Pick up
-    if (!pickUpActive && pickUp && (filterfreqPrevValue < FILTERFREQS256[(value - TOLERANCE) * 2] || filterfreqPrevValue > FILTERFREQS256[(value - TOLERANCE) * 2]))
-      return; // PICK-UP
 
     // MIDI is 7 bit, 128 values and needs to choose alternate filterfreqs(8 bit) by multiplying by 2
     updateFilterFreq(FILTERFREQS256[value * 2]);
-    filterfreqPrevValue = FILTERFREQS256[value * 2]; // PICK-UP
     break;
 
   case CCfilterres:
-    // Pick up
-    if (!pickUpActive && pickUp && (resonancePrevValue < ((14.29f * POWER[value - TOLERANCE]) + 0.71f) || resonancePrevValue > ((14.29f * POWER[value + TOLERANCE]) + 0.71f)))
-      return; // PICK-UP
 
     // If <1.1 there is noise at high cutoff freq
     updateFilterRes((14.29f * POWER[value]) + 0.71f);
-    resonancePrevValue = (14.29f * POWER[value]) + 0.71f; // PICK-UP
     break;
 
   case CCfiltermixer:
-    // Pick up
-    if (!pickUpActive && pickUp && (filterMixPrevValue < LINEAR_FILTERMIXER[value - TOLERANCE] || filterMixPrevValue > LINEAR_FILTERMIXER[value + TOLERANCE]))
-      return; // PICK-UP
 
     updateFilterMixer(LINEAR_FILTERMIXER[value]);
-    filterMixPrevValue = LINEAR_FILTERMIXER[value]; // PICK-UP
     break;
 
   case CCfilterenv:
@@ -987,19 +1037,12 @@ void myControlChange(byte channel, byte control, byte value)
     break;
 
   case CCosclfoamt:
-    // Pick up
-    if (!pickUpActive && pickUp && (oscLfoAmtPrevValue < POWER[value - TOLERANCE] || oscLfoAmtPrevValue > POWER[value + TOLERANCE]))
-      return; // PICK-UP
 
     updatePitchLFOAmt(POWER[value]);
-    oscLfoAmtPrevValue = POWER[value]; // PICK-UP
     break;
 
   case CCoscLfoRate:
   {
-    // Pick up
-    if (!pickUpActive && pickUp && (oscLfoRatePrevValue < LFOMAXRATE * POWER[value - TOLERANCE] || oscLfoRatePrevValue > LFOMAXRATE * POWER[value + TOLERANCE]))
-      return; // PICK-UP
 
     float rate = 0.0;
     if (groupvec[activeGroupIndex]->getPitchLfoMidiClockSync())
@@ -1008,13 +1051,13 @@ void myControlChange(byte channel, byte control, byte value)
       lfoTempoValue = LFOTEMPO[value];
       oscLFOTimeDivStr = LFOTEMPOSTR[value];
       rate = lfoSyncFreq * LFOTEMPO[value];
+      groupvec[activeGroupIndex]->setPitchLfoBeats(LFOTEMPO[value]);
     }
     else
     {
       rate = LFOMAXRATE * POWER[value];
     }
     updatePitchLFORate(rate);
-    oscLfoRatePrevValue = rate; // PICK-UP
     break;
   }
 
@@ -1032,9 +1075,6 @@ void myControlChange(byte channel, byte control, byte value)
 
   case CCfilterlforate:
   {
-    // Pick up
-    if (!pickUpActive && pickUp && (filterLfoRatePrevValue < LFOMAXRATE * POWER[value - TOLERANCE] || filterLfoRatePrevValue > LFOMAXRATE * POWER[value + TOLERANCE]))
-      return; // PICK-UP
 
     float rate;
     String timeDivStr = "";
@@ -1043,6 +1083,7 @@ void myControlChange(byte channel, byte control, byte value)
       lfoTempoValue = LFOTEMPO[value];
       rate = lfoSyncFreq * LFOTEMPO[value];
       timeDivStr = LFOTEMPOSTR[value];
+      groupvec[activeGroupIndex]->setFilterLfoBeats(LFOTEMPO[value]);
     }
     else
     {
@@ -1050,17 +1091,12 @@ void myControlChange(byte channel, byte control, byte value)
     }
 
     updateFilterLfoRate(rate, timeDivStr);
-    filterLfoRatePrevValue = rate; // PICK-UP
     break;
   }
 
   case CCfilterlfoamt:
-    // Pick up
-    if (!pickUpActive && pickUp && (filterLfoAmtPrevValue < LINEAR[value - TOLERANCE] * FILTERMODMIXERMAX || filterLfoAmtPrevValue > LINEAR[value + TOLERANCE] * FILTERMODMIXERMAX))
-      return; // PICK-UP
 
     updateFilterLfoAmt(LINEAR[value] * FILTERMODMIXERMAX);
-    filterLfoAmtPrevValue = LINEAR[value] * FILTERMODMIXERMAX; // PICK-UP
     break;
 
   case CCfilterlfowaveform:
@@ -1113,19 +1149,11 @@ void myControlChange(byte channel, byte control, byte value)
     break;
 
   case CCfxamt:
-    // Pick up
-    if (!pickUpActive && pickUp && (fxAmtPrevValue < ENSEMBLE_LFO[value - TOLERANCE] || fxAmtPrevValue > ENSEMBLE_LFO[value + TOLERANCE]))
-      return; // PICK-UP
     updateEffectAmt(ENSEMBLE_LFO[value]);
-    fxAmtPrevValue = ENSEMBLE_LFO[value]; // PICK-UP
     break;
 
   case CCfxmix:
-    // Pick up
-    if (!pickUpActive && pickUp && (fxMixPrevValue < LINEAR[value - TOLERANCE] || fxMixPrevValue > LINEAR[value + TOLERANCE]))
-      return; // PICK-UP
     updateEffectMix(LINEAR[value]);
-    fxMixPrevValue = LINEAR[value]; // PICK-UP
     break;
 
   case CCallnotesoff:
@@ -1136,6 +1164,8 @@ void myControlChange(byte channel, byte control, byte value)
 
 FLASHMEM void myProgramChange(byte channel, byte program)
 {
+  if (midiDiscard)
+    return;
   state = PATCH;
   patchNo = program + 1;
   recallPatch(patchNo);
@@ -1146,6 +1176,8 @@ FLASHMEM void myProgramChange(byte channel, byte program)
 
 FLASHMEM void myMIDIClockStart()
 {
+  if (midiDiscard)
+    return;
   setMIDIClkSignal(true);
   // Resync LFOs when MIDI Clock starts.
   // When there's a jump to a different
@@ -1153,27 +1185,49 @@ FLASHMEM void myMIDIClockStart()
   // rhythmic quantisation as Tempo Div.
 
   // TODO: Apply to all groupvec[activeGroupIndex]-> Maybe check channel?
+  count = 0;
+  midiBeatCount = 0;
+  midiLastBeatMicros = micros();
   groupvec[activeGroupIndex]->midiClockStart();
 }
 
 FLASHMEM void myMIDIClockStop()
 {
+  if (midiDiscard)
+    return;
   setMIDIClkSignal(false);
 }
 
-FLASHMEM void myMIDIClock()
+// MIDI clock (24 per beat): the tempo is measured each beat (in microseconds, was
+// milliseconds) and synced LFOs are kept in phase with the beat count since Start.
+
+FLASHMEM float nearestLfoTempo(float cyclesPerBeat)
 {
-  // This recalculates the LFO frequencies if the tempo changes (MIDI cLock is 24ppq)
+  float best = LFOTEMPO[0];
+  for (uint8_t i = 1; i < 128; i++)
+    if (fabsf(LFOTEMPO[i] - cyclesPerBeat) < fabsf(best - cyclesPerBeat))
+      best = LFOTEMPO[i];
+  return best;
+}
+
+void myMIDIClock()
+{
+  if (midiDiscard)
+    return;
   if (count > 23)
   {
-    // TODO: Most of this needs to move into the VoiceGroup
-
     setMIDIClkSignal(!getMIDIClkSignal());
-    long timeNow = millis();
-    midiClkTimeInterval = (timeNow - previousMillis);
-    lfoSyncFreq = 1000.0f / midiClkTimeInterval;
-    previousMillis = timeNow;
-    groupvec[activeGroupIndex]->midiClock(lfoSyncFreq * lfoTempoValue);
+    const uint32_t now = micros();
+    const uint32_t beatMicros = now - midiLastBeatMicros;
+    const bool haveTempo = midiLastBeatMicros != 0 && beatMicros > 0 && beatMicros < 4000000; // 15bpm and up
+    midiLastBeatMicros = now;
+    midiBeatCount++;
+    if (haveTempo)
+    {
+      midiClkTimeInterval = beatMicros / 1000;
+      lfoSyncFreq = 1000000.0f / beatMicros;
+      groupvec[activeGroupIndex]->midiClockBeat(midiBeatCount, beatMicros * 0.000001f);
+    }
     count = 0;
   }
 
@@ -1182,6 +1236,7 @@ FLASHMEM void myMIDIClock()
 
 FLASHMEM void recallPatch(int patchNo)
 {
+  LockGuard lock(displayLock); // Don't render a half loaded patch
   groupvec[activeGroupIndex]->allNotesOff();
   groupvec[activeGroupIndex]->closeEnvelopes();
   File patchFile = SD.open(String(patchNo).c_str());
@@ -1208,7 +1263,7 @@ FLASHMEM void setCurrentPatchData(String data[])
   updateOscFX(data[5].toInt());
   updateDetune(data[6].toFloat(), data[48].toInt());
   // Why is this MIDI Clock stuff part of the patch??
-  lfoSyncFreq = data[7].toInt();
+  lfoSyncFreq = data[7].toFloat(); // was toInt(), which dropped the fraction (e.g. 1.67 -> 1)
   midiClkTimeInterval = data[8].toInt();
   lfoTempoValue = data[9].toFloat();
   updateKeyTracking(data[10].toFloat());
@@ -1222,25 +1277,21 @@ FLASHMEM void setCurrentPatchData(String data[])
   updatePWB(data[21].toFloat(), data[18].toFloat());
   updatePWMRate(data[19].toFloat());
   updateFilterRes(data[22].toFloat());
-  resonancePrevValue = data[22].toFloat(); // Pick-up
   updateFilterFreq(data[23].toFloat());
-  filterfreqPrevValue = data[23].toInt(); // Pick-up
   updateFilterMixer(data[24].toFloat());
-  filterMixPrevValue = data[24].toFloat(); // Pick-up
   updateFilterEnv(data[25].toFloat());
   updatePitchLFOAmt(data[26].toFloat());
-  oscLfoAmtPrevValue = data[26].toFloat(); // PICK-UP
   updatePitchLFORate(data[27].toFloat());
-  oscLfoRatePrevValue = data[27].toFloat(); // PICK-UP
   updatePitchLFOWaveform(data[28].toInt());
   updatePitchLFORetrig(data[29].toInt() > 0);
   updatePitchLFOMidiClkSync(data[30].toInt() > 0); // MIDI CC Only
   updateFilterLfoRate(data[31].toFloat(), "");
-  filterLfoRatePrevValue = data[31].toFloat(); // PICK-UP
   updateFilterLFORetrig(data[32].toInt() > 0);
   updateFilterLFOMidiClkSync(data[33].toInt() > 0);
+  // Synced LFO divisions: only one tempo value is saved, so work each out from its rate
+  groupvec[activeGroupIndex]->setPitchLfoBeats(nearestLfoTempo(lfoSyncFreq > 0 ? data[27].toFloat() / lfoSyncFreq : lfoTempoValue));
+  groupvec[activeGroupIndex]->setFilterLfoBeats(nearestLfoTempo(lfoSyncFreq > 0 ? data[31].toFloat() / lfoSyncFreq : lfoTempoValue));
   updateFilterLfoAmt(data[34].toFloat());
-  filterLfoAmtPrevValue = data[34].toFloat(); // PICK-UP
   updateFilterLFOWaveform(data[35].toFloat());
   updateFilterAttack(data[36].toFloat());
   updateFilterDecay(data[37].toFloat());
@@ -1251,12 +1302,11 @@ FLASHMEM void setCurrentPatchData(String data[])
   updateSustain(data[42].toFloat());
   updateRelease(data[43].toFloat());
   updateEffectAmt(data[44].toFloat());
-  fxAmtPrevValue = data[44].toFloat(); // PICK-UP
   updateEffectMix(data[45].toFloat());
-  fxMixPrevValue = data[45].toFloat(); // PICK-UP
   updatePitchEnv(data[46].toFloat());
   velocitySens = data[47].toFloat();
   groupvec[activeGroupIndex]->setMonophonic(data[49].toInt());
+  pickupRearmAll(); // Knobs pick up the recalled values
   //  SPARE1 = data[50].toFloat();
   //  SPARE2 = data[51].toFloat();
 
@@ -1280,6 +1330,9 @@ void checkMux()
   {
     mux1ValuesPrev[muxInput] = mux1Read;
     mux1Read = (mux1Read >> 5); // Change range to 0-127
+    if (pickupCheck(PU_KNOB(0, muxInput), mux1Read))
+    {
+    controlFromPanel = true;
     switch (muxInput)
     {
     case MUX1_noiseLevel:
@@ -1349,13 +1402,18 @@ void checkMux()
       myControlChange(midiChannel, CCpitchenv, mux1Read);
       break;
     }
+    controlFromPanel = false;
+    }
   }
   mux2Read = adc->adc1->analogRead(MUX2_S);
   if (mux2Read > (mux2ValuesPrev[muxInput] + QUANTISE_FACTOR) || mux2Read < (mux2ValuesPrev[muxInput] - QUANTISE_FACTOR))
   {
     mux2ValuesPrev[muxInput] = mux2Read;
-    if (muxInput != MUX2_cutoff)
-      mux2Read = (mux2Read >> 5); // Change range to 0-127
+    // Change range to 0-127, except Filter Cutoff which is 8 bit, 256 values for smoother changes
+    mux2Read = muxInput == MUX2_cutoff ? (mux2Read >> 4) : (mux2Read >> 5);
+    if (pickupCheck(PU_KNOB(1, muxInput), mux2Read))
+    {
+    controlFromPanel = true;
     switch (muxInput)
     {
     case MUX2_attack:
@@ -1411,13 +1469,7 @@ void checkMux()
       myControlChange(midiChannel, CCfilterres, mux2Read);
       break;
     case MUX2_cutoff:
-      // Special case - Filter Cutoff is 8 bit, 256 values for smoother changes
-      mux2Read = (mux2Read >> 4);
-      if (!pickUpActive && pickUp && (filterfreqPrevValue < FILTERFREQS256[mux2Read - TOLERANCE] || filterfreqPrevValue > FILTERFREQS256[mux2Read + TOLERANCE]))
-        return; // PICK-UP
-
       updateFilterFreq(FILTERFREQS256[mux2Read]);
-      filterfreqPrevValue = FILTERFREQS256[mux2Read]; // PICK-UP
       midiCCOut(CCfilterfreq, mux2Read >> 1);
       break;
     case MUX2_filterLFORate:
@@ -1428,6 +1480,8 @@ void checkMux()
       midiCCOut(CCfilterlfowaveform, mux2Read);
       myControlChange(midiChannel, CCfilterlfowaveform, mux2Read);
       break;
+    }
+    controlFromPanel = false;
     }
   }
   muxInput++;
@@ -1463,6 +1517,37 @@ void checkVolumePot()
 void showSettingsPage()
 {
   showSettingsPage(settings::current_setting(), settings::current_setting_value(), state);
+}
+
+// Read and drop everything waiting in the MIDI inputs, so a backlog from a flood of MIDI
+// doesn't keep playing after Panic. Bounded in time in case the sender keeps going.
+#define MIDI_FLUSH_MAX_MS 50
+void flushMidiInput()
+{
+  midiDiscard = true;
+  elapsedMillis t;
+  bool more = true;
+  while (more && t < MIDI_FLUSH_MAX_MS)
+  {
+    more = false;
+    myusb.Task();
+    if (midi1.read())   // USB host
+      more = true;
+    if (usbMIDI.read()) // USB device
+      more = true;
+  }
+  // 5 pin DIN: drop the unread bytes without parsing them, so they aren't sent to MIDI thru
+  Serial1.clear();
+  midiDiscard = false;
+}
+
+void panic()
+{
+  flushMidiInput();
+  AudioNoInterrupts();
+  groupvec[activeGroupIndex]->panic();
+  AudioInterrupts();
+  showCurrentParameterPage(F("Panic"), F("All notes off"));
 }
 
 void checkSwitches()
@@ -1517,6 +1602,7 @@ void checkSwitches()
     case PARAMETER:
       if (patches.size() < PATCHES_LIMIT)
       {
+        LockGuard lock(displayLock); // The display renders from the patch list
         resetPatchesOrdering(); // Reset order of patches from first patch
         patches.push({patches.size() + 1, INITPATCHNAME});
         state = SAVE;
@@ -1578,9 +1664,8 @@ void checkSwitches()
   backButton.update();
   if (backButton.held())
   {
-    // If Back button held, Panic - all notes off
-    groupvec[activeGroupIndex]->allNotesOff();
-    groupvec[activeGroupIndex]->closeEnvelopes();
+    // If Back button held, Panic: drop any MIDI waiting to be read, then silence all voices
+    panic();
   }
   else if (backButton.numClicks() == 1)
   {
@@ -1659,6 +1744,7 @@ void checkSwitches()
       // Don't delete final patch
       if (patches.size() > 1)
       {
+        LockGuard lock(displayLock);          // The display renders from the patch list
         state = DELETEMSG;
         patchNo = patches.first().patchNo;    // PatchNo to delete from SD card
         patches.shift();                      // Remove patch from circular buffer
@@ -1696,8 +1782,39 @@ FLASHMEM void reinitialiseToPanel()
     mux2ValuesPrev[i] = RE_READ;
   }
   volumePrevious = RE_READ;
+  pickupReleaseAll(); // Every knob sets its parameter
   patchName = INITPATCHNAME;
   showPatchPage(F("Initial"), F("Panel Settings"));
+}
+
+// Turning the encoder on the patch page only selects and shows the patch. It is recalled
+// once the encoder has been still for PATCH_RECALL_DELAY_MS, rather than on every detent:
+// each recall reads the SD card and sets every parameter, which a fast turn used to do
+// dozens of times a second.
+#define PATCH_RECALL_DELAY_MS 150
+boolean patchRecallPending = false;
+elapsedMillis patchRecallTimer;
+
+void selectPatchForRecall()
+{
+  patchNo = patches.first().patchNo;
+  showPatchPage(String(patchNo), patches.first().patchName);
+  state = PATCH;
+  patchRecallPending = true;
+  patchRecallTimer = 0;
+}
+
+void checkPendingPatchRecall()
+{
+  if (!patchRecallPending || patchRecallTimer < PATCH_RECALL_DELAY_MS)
+    return;
+  patchRecallPending = false;
+  recallPatch(patchNo);
+  if (state == PATCH)
+    state = PARAMETER;
+  // Make sure the current setting value is refreshed.
+  settings::increment_setting();
+  settings::decrement_setting();
 }
 
 void checkEncoder()
@@ -1707,17 +1824,13 @@ void checkEncoder()
   long encRead = encoder.read();
   if ((encCW && encRead > encPrevious + 3) || (!encCW && encRead < encPrevious - 3))
   {
+    LockGuard lock(displayLock); // The display renders from the patch list
     switch (state)
     {
     case PARAMETER:
-      state = PATCH;
+    case PATCH: // Still turning, recall not done yet
       patches.push(patches.shift());
-      patchNo = patches.first().patchNo;
-      recallPatch(patchNo);
-      state = PARAMETER;
-      // Make sure the current setting value is refreshed.
-      settings::increment_setting();
-      settings::decrement_setting();
+      selectPatchForRecall();
       break;
     case RECALL:
       patches.push(patches.shift());
@@ -1747,17 +1860,13 @@ void checkEncoder()
   }
   else if ((encCW && encRead < encPrevious - 3) || (!encCW && encRead > encPrevious + 3))
   {
+    LockGuard lock(displayLock); // The display renders from the patch list
     switch (state)
     {
     case PARAMETER:
-      state = PATCH;
+    case PATCH: // Still turning, recall not done yet
       patches.unshift(patches.pop());
-      patchNo = patches.first().patchNo;
-      recallPatch(patchNo);
-      state = PARAMETER;
-      // Make sure the current setting value is refreshed.
-      settings::increment_setting();
-      settings::decrement_setting();
+      selectPatchForRecall();
       break;
     case RECALL:
       patches.unshift(patches.pop());
@@ -1822,33 +1931,140 @@ FLASHMEM void checkUSBHostStatus()
   }
 }
 
+// Audio CPU use, once a second: total, then by group of audio objects (current / max over
+// the last second, in % of the time available). Uncomment the call in loop() to use.
+struct CpuGroup
+{
+  float now = 0, max = 0;
+  void add(AudioStream &s)
+  {
+    now += s.processorUsage();
+    max += s.processorUsageMax();
+    s.processorUsageMaxReset();
+  }
+  void print(const __FlashStringHelper *name)
+  {
+    Serial.print(F("  "));
+    Serial.print(name);
+    Serial.print(F(" "));
+    Serial.print(now, 1);
+    Serial.print(F("/"));
+    Serial.print(max, 1);
+  }
+};
+
 void CPUMonitor()
 {
-  Serial.print(F(" CPU:"));
-  Serial.print(AudioProcessorUsage());
-  Serial.print(F(" ("));
-  Serial.print(AudioProcessorUsageMax());
-  Serial.print(F(")"));
-  Serial.print(F("  MEM:"));
-  Serial.println(AudioMemoryUsageMax());
-  delayMicroseconds(500);
+  static elapsedMillis sinceLast;
+  if (sinceLast < 1000)
+    return;
+  sinceLast = 0;
+
+  CpuGroup cg_osc, cg_filt, cg_env, cg_vmix, cg_fx, cg_dc, cg_lfo, cg_smix, cg_ens, cg_dcf, cg_noise, cg_out;
+  for (uint8_t i = 0; i < global.maxVoices(); i++)
+  {
+    Patch &p = global.Oscillators[i];
+    cg_osc.add(p.waveformMod_a);
+    cg_osc.add(p.waveformMod_b);
+    cg_filt.add(p.filter_);
+    cg_env.add(p.ampEnvelope_);
+    cg_env.add(p.filterEnvelope_);
+    cg_vmix.add(p.pwMixer_a);
+    cg_vmix.add(p.pwMixer_b);
+    cg_vmix.add(p.oscModMixer_a);
+    cg_vmix.add(p.oscModMixer_b);
+    cg_vmix.add(p.waveformMixer_);
+    cg_vmix.add(p.filterModMixer_);
+    cg_fx.add(p.oscFX_);
+    cg_dc.add(p.glide_);
+    cg_dc.add(p.keytracking_);
+  }
+  PatchShared &s = global.SharedAudio[0];
+  cg_lfo.add(s.pitchLfo);
+  cg_lfo.add(s.pwmLfoA);
+  cg_lfo.add(s.pwmLfoB);
+  cg_lfo.add(s.filterLfo);
+  cg_lfo.add(s.pitchBend);
+  cg_lfo.add(s.pwa);
+  cg_lfo.add(s.pwb);
+  cg_smix.add(s.pitchMixer);
+  cg_smix.add(s.noiseMixer);
+  for (uint8_t i = 0; i < 3; i++)
+    cg_smix.add(s.voiceMixer[i]);
+  cg_smix.add(s.voiceMixerM);
+  cg_smix.add(s.volumeMixer);
+  cg_smix.add(s.effectMixerL);
+  cg_smix.add(s.effectMixerR);
+  cg_ens.add(s.ensemble);
+  cg_dcf.add(s.dcOffsetFilter);
+  cg_noise.add(global.pink);
+  cg_noise.add(global.white);
+  cg_out.add(global.i2s);
+  cg_out.add(global.usbAudio);
+  cg_out.add(global.peak);
+  cg_out.add(global.scope);
+  cg_out.add(global.cpuGuard);
+  cg_out.add(global.constant1Dc);
+  for (uint8_t i = 0; i < 3; i++)
+  {
+    cg_out.add(global.effectMixerL[i]);
+    cg_out.add(global.effectMixerR[i]);
+  }
+  cg_out.add(global.effectMixerLM);
+  cg_out.add(global.effectMixerRM);
+
+  Serial.print(F("CPU "));
+  Serial.print(AudioProcessorUsage(), 1);
+  Serial.print(F("/"));
+  Serial.print(AudioProcessorUsageMax(), 1);
+  Serial.print(F("% MEM "));
+  Serial.print(AudioMemoryUsageMax());
+  Serial.print(F(" |"));
+  cg_osc.print(F("osc"));
+  cg_filt.print(F("filter"));
+  cg_env.print(F("env"));
+  cg_vmix.print(F("vmix"));
+  cg_fx.print(F("oscfx"));
+  cg_dc.print(F("dc"));
+  cg_lfo.print(F("lfo"));
+  cg_smix.print(F("smix"));
+  cg_ens.print(F("ensemble"));
+  cg_dcf.print(F("dcfilt"));
+  cg_noise.print(F("noise"));
+  cg_out.print(F("out"));
+  Serial.println();
+  AudioProcessorUsageMaxReset();
 }
 
 void loop()
 {
   // USB HOST MIDI Class Compliant
-   myusb.Task();
-  midi1.read(midiChannel);
+  myusb.Task();
+  // Drain pending MIDI messages (bounded) so notes aren't queued behind clock/CC traffic
+  for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && midi1.read(midiChannel); i++)
+    ;
   // USB Client MIDI
-  usbMIDI.read(midiChannel);
+  for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && usbMIDI.read(midiChannel); i++)
+    ;
   // MIDI 5 Pin DIN
-  MIDI.read(midiChannel);
+  for (uint8_t i = 0; i < MIDI_READS_PER_LOOP && MIDI.read(midiChannel); i++)
+    ;
+  // Start note-ons that were waiting for a stolen voice to fade out, and suspend the
+  // oscillators of voices that have stopped sounding
+  groupvec[activeGroupIndex]->serviceVoices();
+  static uint32_t overloadsReported = 0;
+  if (global.cpuGuard.overloads != overloadsReported)
+  {
+    overloadsReported = global.cpuGuard.overloads;
+    Serial.println(F("Audio CPU overload: a voice was dropped"));
+  }
   if (loopCount++ > 9)
   {
     checkUSBHostStatus();
     checkMux();
     checkSwitches();
     checkEncoder();
+    checkPendingPatchRecall();
     // CPUMonitor();
     loopCount = 0;
   }

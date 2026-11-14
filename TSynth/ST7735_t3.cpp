@@ -1126,6 +1126,87 @@ bool ST7735_t3::updateScreenAsync(bool update_cont)         // call to say updat
 
 }      
 
+#if defined(__IMXRT1062__)
+// TSynth: frame update as a single DMA transfer, polled for completion.
+//
+// updateScreenAsync() sends the frame as 40 sub-frames through two small ping-pong buffers
+// and counts completion interrupts to know where it is. Each sub-frame takes ~340us; if
+// the interrupt is held up longer than that, two completions arrive as one interrupt, the
+// count slips, the channel is stopped on the wrong sub-frame and the final interrupt never
+// comes: the update stays "active" for ever and the display freezes (seen under heavy MIDI
+// load). Here the whole frame (20480 pixels, within the DMA's 32767 transfer limit) goes in
+// one transfer from the frame buffer itself, flushed from the cache first, and the display
+// thread polls the channel's done flag. No interrupts are involved.
+
+bool ST7735_t3::oneShotUpdate(void)
+{
+  if (!_use_fbtft || !_pspi || _oneshot_active || (_dma_state & ST77XX_DMA_ACTIVE))
+    return false;
+  if (_count_pixels > 32767)
+    return false;
+
+  // The frame buffer is in cached RAM: write it back so the DMA sees what was drawn
+  arm_dcache_flush((void *)_pfbtft, _count_pixels * 2);
+
+  _oneshot_dma.disable();
+  _oneshot_dma.sourceBuffer(_pfbtft, _count_pixels * 2);
+  _oneshot_dma.destination(_pimxrt_spi->TDR);
+  _oneshot_dma.TCD->ATTR_DST = 1; // 16 bit writes to the SPI
+  _oneshot_dma.disableOnCompletion();
+  _oneshot_dma.triggerAtHardwareEvent(_spi_hardware->tx_dma_channel);
+  _oneshot_dma.clearComplete();
+
+  // Same SPI set up as updateScreenAsync()
+  beginSPITransaction();
+  setAddr(0, 0, _width-1, _height-1);
+  writecommand_last(ST7735_RAMWR);
+  _spi_fcr_save = _pimxrt_spi->FCR;
+  _pimxrt_spi->FCR = 0;
+  maybeUpdateTCR(LPSPI_TCR_PCS(1) | LPSPI_TCR_FRAMESZ(15) | LPSPI_TCR_RXMSK);
+  _pimxrt_spi->DER = LPSPI_DER_TDDE;
+  _pimxrt_spi->SR = 0x3f00;
+
+  _oneshot_active = true;
+  _oneshot_dma.enable();
+  return true;
+}
+
+// Same clean up as the end of process_dma_interrupt(), with the waits bounded
+void ST7735_t3::oneShotFinish(void)
+{
+  uint32_t n = 0;
+  while ((_pimxrt_spi->FSR & 0x1f) && ++n < 1000000) ; // TX FIFO empty
+  n = 0;
+  while ((_pimxrt_spi->SR & LPSPI_SR_MBF) && ++n < 1000000) ; // last word sent
+  _oneshot_dma.clearComplete();
+  _pimxrt_spi->FCR = LPSPI_FCR_TXWATER(15);
+  _pimxrt_spi->DER = 0;
+  _pimxrt_spi->CR = LPSPI_CR_MEN | LPSPI_CR_RRF | LPSPI_CR_RTF;
+  _pimxrt_spi->SR = 0x3f00;
+  _pending_rx_count = 0;
+  endSPITransaction();
+  _oneshot_active = false;
+}
+
+bool ST7735_t3::oneShotUpdateActive(void)
+{
+  if (!_oneshot_active)
+    return false;
+  if (!_oneshot_dma.complete())
+    return true;
+  oneShotFinish();
+  return false;
+}
+
+void ST7735_t3::oneShotUpdateAbort(void)
+{
+  if (!_oneshot_active)
+    return;
+  _oneshot_dma.disable();
+  oneShotFinish();
+}
+#endif
+
 void ST7735_t3::endUpdateAsync() {
   // make sure it is on
   #ifdef ENABLE_ST77XX_FRAMEBUFFER

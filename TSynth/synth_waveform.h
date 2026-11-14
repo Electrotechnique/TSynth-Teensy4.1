@@ -69,15 +69,24 @@ public:
   int16_t generate_sawtooth (uint32_t new_phase, int i) ;
   int16_t generate_square (uint32_t new_phase, int i) ;
   int16_t generate_pulse (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  // Whole blocks, same results as the per-sample calls (saves a call per sample)
+  void generate_sawtooth_block (const uint32_t *phases, int16_t *out, int32_t magnitude, bool reverse) ;
+  void generate_square_block (const uint32_t *phases, int16_t *out, int32_t magnitude) ;
+  void generate_pulse_block (const uint32_t *phases, const int16_t *shape, int16_t *out, int32_t magnitude) ;
   void init_sawtooth (uint32_t freq_word) ;
   void init_square (uint32_t freq_word) ;
   void init_pulse (uint32_t freq_word, uint32_t pulse_width) ;
+  // Band-limited variable triangle (rising for pulse_width of the cycle)
+  int16_t generate_triangle_variable (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  // A whole block: same result as calling generate_triangle_variable() per sample, but
+  // without two function calls and the state reloads on every sample
+  void generate_triangle_variable_block (const uint32_t *phases, const int16_t *shape, int16_t *out, int32_t magnitude) ;
+  void init_triangle_variable (uint32_t freq_word) ;
   
 
 private:
-  int32_t lookup (int offset) ;
+  inline int32_t lookup (int offset) ;
   void insert_step (int offset, bool rising, int i) ;
-  int32_t process_step (int i) ;
   int32_t process_active_steps (uint32_t new_phase) ;
   int32_t process_active_steps_saw (uint32_t new_phase) ;
   int32_t process_active_steps_pulse (uint32_t new_phase, uint32_t pulse_width) ;
@@ -88,12 +97,44 @@ private:
   
   uint32_t phase_word ;
   int32_t dc_offset ;
-  step_state states [32] ; // circular buffer of active steps
-  int newptr ;         // buffer pointers into states, AND'd with PTRMASK to keep in buffer range.
-  int delptr ;
   int32_t  cyclic[16] ;    // circular buffer of output samples
+  // Each step's level change is applied as soon as it is made; what is left of its
+  // band-limited shape (a residual that dies away) is added to these future samples.
+  int32_t future [32] ;
+  int fut_pos ;
+  void reset_steps (void) ;
   bool pulse_state ;
   uint32_t sampled_width ; // pulse width is sampled once per waveform
+
+  // Variable triangle: its slope (+2/W rising, -2/(1-W) falling, per cycle) is made with
+  // band-limited steps of any size, one per corner, then integrated. The width is latched
+  // at the start of each cycle and only sets the size of that cycle's corners, so width
+  // changes are exact. Same 16 sample delay as the other waveforms.
+  float vt_future [32] ;  // residuals of corner steps still playing out, as future[]
+  int vt_fpos ;
+  float vt_level ;       // slope, including the full size of every corner so far
+  float vt_cyc [16] ;    // delayed slope samples
+  float vt_dph [16] ;    // phase step per sample, delayed to match
+  float vt_ref [16] ;    // plain triangle, delayed, for drift correction
+  float vt_y ;           // integrator, +/-1
+  float vt_w ;           // latched width
+  float vt_inv_w ;       // 1/W and 1/(1-W), worked out once per cycle
+  float vt_inv_1mw ;
+  int vt_dc_count = 0 ;  // start-up DC fix: samples left to measure
+  int vt_dc_period = 0 ;
+  int vt_dc_ramp = 0 ;   // samples left to apply
+  float vt_dc_sum = 0.0f ;
+  float vt_dc_step = 0.0f ;
+  uint32_t vt_w32 ;
+  bool vt_rising ;
+  bool vt_sync ;         // align to the real phase on the next sample
+  uint32_t vt_inc ;
+  void vt_insert (uint32_t dist, uint32_t dphase, float amp, int i) ;
+  int16_t vt_step (uint32_t new_phase, uint32_t pulse_width, int i) ;
+  void vt_corners (uint32_t new_phase, uint32_t pulse_width, uint32_t dphase, int i) ;
+  inline float vt_ref_at (uint32_t phase) ;
+  inline void vt_set_width (uint32_t w32) ;
+  inline void vt_dc_track (float &y) ;
 };
 
 
@@ -128,6 +169,19 @@ public:
   void sync() {
     syncFlag = 1;
   }       
+  // Phase in cycles (0 to <1) at the start of the last block, and a phase to jump to at
+  // the start of the next one (used to lock MIDI clock synced LFOs to the beat)
+  float getPhase() { return (uint32_t)(phase_accumulator + phase_offset) * (1.0f / 4294967296.0f); }
+  void setPhase(float cycles) {
+    cycles -= floorf(cycles);
+    pendingPhase = (uint32_t)(cycles * 4294967296.0f) - phase_offset;
+    phaseSetFlag = 1;
+  }
+  // Round off the jumps of square, pulse, saw and sample & hold waveforms over about
+  // this many milliseconds (one-pole), so an LFO doesn't click. 0 = off.
+  void smoothing(float ms) {
+    smooth_k = ms > 0.0f ? 1.0f - expf(-1000.0f / (ms * AUDIO_SAMPLE_RATE_EXACT)) : 0.0f;
+  }
   void amplitude(float n) { // 0 to 1.0
     if (n < 0) {
       n = 0;
@@ -185,6 +239,11 @@ private:
   int16_t  tone_offset;
     int16_t   syncFlag;
         BandLimitedWaveformTS band_limit_waveform ;
+        volatile uint32_t pendingPhase = 0;
+        volatile uint8_t phaseSetFlag = 0;
+        float smooth_k = 0.0f;  // smoothing coefficient, 0 = off
+        float smooth_y = 0.0f;
+        bool smooth_started = false;
 };
 
 
@@ -225,12 +284,23 @@ public:
     }
     tone_offset = n * 32767.0;
   }
+  // Stop generating while the voice is silent (saves CPU); resume before the next note.
+  // Call with audio interrupts off (AudioNoInterrupts) or from the audio interrupt.
+  void suspend() { suspended = true; }
+  void resume() {
+    if (!suspended) return;
+    suspended = false;
+    begin(tone_type); // restart the band-limited waveform from its current settings
+  }
+  bool isSuspended() { return suspended; }
   void begin(short t_type) {
     tone_type = t_type;
     if (t_type == WAVEFORM_BANDLIMIT_SQUARE)
       band_limit_waveform.init_square (phase_increment) ;
     else if (t_type == WAVEFORM_BANDLIMIT_PULSE)
       band_limit_waveform.init_pulse (phase_increment, 0x80000000u) ;
+    else if (t_type == WAVEFORM_TRIANGLE_VARIABLE)
+      band_limit_waveform.init_triangle_variable (phase_increment) ;
     else if (t_type == WAVEFORM_BANDLIMIT_SAWTOOTH || t_type == WAVEFORM_BANDLIMIT_SAWTOOTH_REVERSE)
       band_limit_waveform.init_sawtooth (phase_increment) ;
   }
@@ -276,6 +346,7 @@ private:
   uint8_t  modulation_type;
     int16_t   syncFlag;
         BandLimitedWaveformTS band_limit_waveform ;
+        volatile bool suspended = false;
 };
 
 

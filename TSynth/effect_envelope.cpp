@@ -48,6 +48,15 @@ void AudioEffectEnvelopeTS::noteOn(void)
 
     case STATE_IDLE:
     case STATE_IDLE_NEXT:
+      if (hold_after_forced)
+      {
+        state = STATE_WAIT;
+        ysum = 0;
+        mult_hires = 0;
+        inc_hires = 0;
+        count = 0xFFFF;
+        break;
+      }
       // In a corner case, where the state becomes STATE_IDLE EXACTLY at the end of an update(),
 	  // AND noteOn() is called before the next update() occurs, AND delay_count is non-zero, 
 	  // AND the exponential envelope shape is in use, exp_count will have a stale value 
@@ -80,6 +89,7 @@ void AudioEffectEnvelopeTS::noteOn(void)
       count=release_forced_count;
       inc_hires=(-mult_hires)/(int32_t)count;
     case STATE_FORCED:
+    case STATE_WAIT:
       break;
     default:
       state=STATE_RELEASE;
@@ -91,11 +101,13 @@ void AudioEffectEnvelopeTS::noteOn(void)
 void AudioEffectEnvelopeTS::noteOff(void)
 {
   __disable_irq();
+  hold_after_forced = false;
   switch(state)
   {
     case STATE_IDLE:
     case STATE_IDLE_NEXT:
     case STATE_DELAY:
+    case STATE_WAIT:
       state=STATE_IDLE;
       break;
     default:
@@ -162,7 +174,11 @@ void AudioEffectEnvelopeTS::update(void)
         } else if (state == STATE_FORCED) {
           mult_hires = 0;
           count = delay_count;
-          if (count > 0) {
+          if (hold_after_forced) {
+            state = STATE_WAIT;
+            count = 0xFFFF;
+            inc_hires = 0;
+          } else if (count > 0) {
             state = STATE_DELAY;
             inc_hires = 0;
           } else {
@@ -175,6 +191,9 @@ void AudioEffectEnvelopeTS::update(void)
           count = attack_count;
           inc_hires = 0x40000000 / count;
           continue;
+        }
+        else if (state == STATE_WAIT) {
+          count = 0xFFFF;
         }
         else
         {
@@ -302,7 +321,7 @@ void AudioEffectEnvelopeTS::update(void)
             ysum=EXP_ENV_FILT2(release_forced_k,ysum,-FORCED_RELEASE_BIAS);
             if(YSUM2MULT(ysum)<=0)
             { 
-              state=STATE_ATTACK;// revert to IDLE state when useful bits are zero.
+              state=hold_after_forced ? STATE_WAIT : STATE_ATTACK;// revert to IDLE state when useful bits are zero.
               ysum=0;
             }
           default:

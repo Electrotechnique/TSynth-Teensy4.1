@@ -7,6 +7,9 @@
 #define dc 3
 #define rst 9
 #define DISPLAYTIMEOUT 700
+#define DISPLAY_FRAME_MS 30      // Minimum time between screen refreshes (~33fps max)
+#define DISPLAY_THREAD_STACK 4096 // bytes; the TeensyThreads default of 1024 is tight for the render code
+#define DISPLAY_THREAD_TICKS 1   // Display thread time slice in 1ms ticks. Main loop (MIDI) waits at most this long
 
 #include <Adafruit_GFX.h>
 #include "ST7735_t3.h" // Local copy from TD1.48 that works for 0.96" IPS 160x80 display
@@ -212,7 +215,14 @@ FLASHMEM void renderCurrentParameterPage() {
       tft.println(currentValue);
       if (pickUpActive) {
         tft.fillCircle(150, 70, 5, ST77XX_DARKGREY);
-        tft.drawFastHLine(146, 70, 4, ST7735_WHITE);
+        // Knob waiting to pick up: small arrow inside the indicator showing which way to turn
+        if (pickupDirection > 0) {
+          tft.fillTriangle(147, 72, 153, 72, 150, 67, ST7735_WHITE);
+        } else if (pickupDirection < 0) {
+          tft.fillTriangle(147, 68, 153, 68, 150, 73, ST7735_WHITE);
+        } else {
+          tft.drawFastHLine(146, 70, 4, ST7735_WHITE);
+        }
       }
       switch (paramType) {
         case PULSE:
@@ -345,6 +355,7 @@ FLASHMEM void renderRecallPage()
 }
 
 FLASHMEM void showRenamingPage(String newName) {
+  LockGuard lock(displayLock);
   newPatchName = newName;
 }
 
@@ -371,6 +382,7 @@ FLASHMEM void renderSettingsPage() {
 }
 
 FLASHMEM void showCurrentParameterPage(String param, int pType, float val) {
+  LockGuard lock(displayLock);
   currentParameter = param;
   currentValue = String(val);
   currentFloatValue = val;
@@ -379,6 +391,7 @@ FLASHMEM void showCurrentParameterPage(String param, int pType, float val) {
 }
 
 FLASHMEM void showCurrentParameterPage(String param, String val, int pType) {
+  LockGuard lock(displayLock);
   if (state == SETTINGS || state == SETTINGSVALUE)state = PARAMETER;//Exit settings page if showing
   currentParameter = param;
   currentValue = val;
@@ -391,11 +404,13 @@ FLASHMEM void showCurrentParameterPage(String param, String val) {
 }
 
 FLASHMEM void showPatchPage(String number, String patchName) {
+  LockGuard lock(displayLock);
   currentPgmNum = number;
   currentPatchName = patchName;
 }
 
 FLASHMEM void showSettingsPage(const char *  option, const char * value, int settingsPart) {
+  LockGuard lock(displayLock);
   currentSettingsOption = option;
   currentSettingsValue = value;
   currentSettingsPart = settingsPart;
@@ -405,9 +420,64 @@ FLASHMEM void enableScope(boolean enable) {
   enable ? global.scope.ScreenSetup(&tft) : global.scope.ScreenSetup(NULL);
 }
 
+// Send the frame buffer to the display using DMA so the CPU is free during the
+// SPI transfer. Falls back to a blocking update if DMA can't be started.
+// Period in samples of the lowest held note's audible oscillator, 0 if no notes are held.
+// Locks the scope timebase to the waveform.
+float scopePeriodSamples()
+{
+  VoiceGroup *g = groupvec[activeGroupIndex];
+  int lowest = 128;
+  for (uint8_t i = 0; i < g->size(); i++)
+  {
+    Voice *v = (*g)[i];
+    if (v->on() && v->note() < lowest)
+      lowest = v->note();
+  }
+  if (lowest > 127)
+    return 0.0f;
+  VoiceParams &p = g->params();
+  int noteA = lowest + p.oscPitchA;
+  int noteB = lowest + p.oscPitchB;
+  float freq = 0.0f;
+  if (g->getOscLevelA() > 0.01f && noteA >= 0 && noteA < 128)
+    freq = NOTEFREQS[noteA];
+  if (g->getOscLevelB() > 0.01f && noteB >= 0 && noteB < 128 && (freq == 0.0f || NOTEFREQS[noteB] < freq))
+    freq = NOTEFREQS[noteB];
+  if (freq == 0.0f)
+    freq = NOTEFREQS[lowest];
+  return AUDIO_SAMPLE_RATE_EXACT / freq;
+}
+
+void updateScreenDMA() {
+  global.scope.setPeriod(scopePeriodSamples());
+  global.scope.Display(); // Draws only if the scope is enabled
+  // One DMA transfer for the whole frame (~14ms), polled. See ST7735_t3::oneShotUpdate().
+  if (tft.oneShotUpdate()) {
+    elapsedMillis wait;
+    while (tft.oneShotUpdateActive()) {
+      if (wait > 200) {
+        // Should never happen; recover rather than freeze the display
+        Serial.println(F("Display: DMA screen update timed out, reset"));
+        tft.oneShotUpdateAbort();
+        break;
+      }
+      threads.yield();
+    }
+  } else {
+    tft.updateScreen();
+  }
+}
+
 void displayThread() {
   threads.delay(2000); //Give bootup page chance to display
+  elapsedMillis frameTime;
   while (1) {
+    frameTime = 0;
+    bool reinitPause = false;
+    // Render into the frame buffer while holding the lock, so the main loop can't change
+    // the Strings and patch list being drawn. The SPI transfer below runs without it.
+    displayLock.lock();
     switch (state) {
       case PARAMETER:
         if ((millis() - timer) > DISPLAYTIMEOUT) {
@@ -426,9 +496,7 @@ void displayThread() {
         break;
       case REINITIALISE:
         renderReinitialisePage();
-        tft.updateScreen(); //update before delay
-        threads.delay(1000);
-        state = PARAMETER;
+        reinitPause = true; // Shown for a second, below
         break;
       case PATCHNAMING:
         renderPatchNamingPage();
@@ -447,7 +515,14 @@ void displayThread() {
         renderSettingsPage();
         break;
     }
-    tft.updateScreen();
+    displayLock.unlock();
+    updateScreenDMA();
+    if (reinitPause) {
+      threads.delay(1000);
+      state = PARAMETER;
+    }
+    // Yield the CPU back to the main loop (MIDI handling) for the rest of the frame
+    if (frameTime < DISPLAY_FRAME_MS) threads.delay(DISPLAY_FRAME_MS - frameTime);
   }
 }
 
@@ -459,7 +534,9 @@ void setupDisplay() {
   tft.invertDisplay(true);
   renderBootUpPage();
   tft.updateScreen();
-  threads.addThread(displayThread);
+  int displayThreadId = threads.addThread(displayThread, 0, DISPLAY_THREAD_STACK);
+  // Default slice is 10ms, which could hold off MIDI note handling by up to 10ms
+  if (displayThreadId > 0) threads.setTimeSlice(displayThreadId, DISPLAY_THREAD_TICKS);
 }
 
 #endif

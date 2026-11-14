@@ -29,13 +29,7 @@ extern int8_t glideShape;
 //Prevents jumps in value when the patch parameter and control are different values
 extern boolean pickUp;
 extern boolean pickUpActive;
-#define TOLERANCE 2 //Gives a window of when pick-up occurs, this is due to the speed of control changing and Mux reading
-extern float filterfreqPrevValue;
-extern float filterMixPrevValue;
-extern float resonancePrevValue;
-extern float oscLfoAmtPrevValue;
-extern float oscLfoRatePrevValue;
-extern float filterLfoRatePrevValue;
-extern float filterLfoAmtPrevValue;
-extern float fxAmtPrevValue;
-extern float fxMixPrevValue;
+// Knob pick-up, see PickUp.h
+extern int8_t pickupDirection;
+void pickupRearmAll();
+void pickupReleaseAll();

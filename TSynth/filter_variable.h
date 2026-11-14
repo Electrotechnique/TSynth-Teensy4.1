@@ -33,6 +33,18 @@
 #include "Arduino.h"
 #include "AudioStream.h"
 
+// Input attenuation per unit of Q above 0.707 (0 = none)
+#define RESONANCE_INPUT_COMP 0.1f
+
+// Filter core:
+// 1 = TPT (zero-delay feedback, trapezoidal) state variable filter: exact tuning up to
+//     ~20kHz, stable at any setting, resonance the same across the range, smoothed
+//     cutoff and resonance changes.
+// 0 = the original Chamberlin state variable filter (2x oversampled), as before.
+#ifndef FILTER_TPT
+#define FILTER_TPT 1
+#endif
+
 class AudioFilterStateVariableTS: public AudioStream
 {
 public:
@@ -53,12 +65,20 @@ public:
 		// so the sinf() function isn't linked?
 		setting_fmult = sinf(freq * (3.141592654/(AUDIO_SAMPLE_RATE_EXACT*2.0)))
 			* 2147483647.0;
+		tpt_log2fc = log2f(freq);
 	}
 	void resonance(float q) {
 		if (q < 0.7) q = 0.7;
 		else if (q > 15.0) q = 15.0;//ElectroTechnique changed from 5.0
 		// TODO: allow lower Q when frequency is lower
 		setting_damp = (1.0 / q) * 1073741824.0;
+		// Lower the input level as resonance rises (as analog filters do), so the
+		// resonant peak isn't driven so far into the limiter. Unity at Q <= 0.707,
+		// -3dB at Q = 5, about -8dB at Q = 15.
+		float atten = 1.0f + (q > 0.707f ? (q - 0.707f) * RESONANCE_INPUT_COMP : 0.0f);
+		setting_input_gain = 65536.0f / atten;
+		tpt_k = 1.0f / q;
+		tpt_gain = 1.0f / atten;
 	}
 	void octaveControl(float n) {
 		// filter's corner frequency is Fcenter * 2^(control * N)
@@ -67,13 +87,40 @@ public:
 		if (n < 0.0) n = 0.0;
 		else if (n > 6.9999) n = 6.9999;
 		setting_octavemult = n * 4096.0;
+		tpt_oct = n;
+	}
+	// Soft limit the outputs above 75% of full scale instead of hard clipping.
+	// On by default; turn off for utility filters that must stay linear (DC blocker).
+	void softClip(bool enable) { soft_clip = enable; }
+	// Mix the lowpass, bandpass and highpass inside the filter and send only that, on output 0
+	// (outputs 1 and 2 are then unused). Gain changes are smoothed over a block, the soft
+	// limiter acts on the mixed signal, and the bandpass is scaled to unity peak gain (times
+	// 1/Q) so its level matches the other two at any resonance.
+	void mix(float lp, float bp, float hp) {
+		mix_lp = lp; mix_bp = bp; mix_hp = hp;
+		mix_mode = true;
 	}
 	virtual void update(void);
 private:
+	bool soft_clip = true;
+	bool mix_mode = false;
+	float mix_lp = 1.0f, mix_bp = 0.0f, mix_hp = 0.0f;             // targets
+	float mix_lp_now = 1.0f, mix_bp_now = 0.0f, mix_hp_now = 0.0f; // reached at the end of the last block
+	void mix_fixed_point(const int16_t *lp, const int16_t *bp, const int16_t *hp, int16_t *out);
+	int32_t setting_input_gain = 65536; // Q16
 	void update_fixed(const int16_t *in,
 		int16_t *lp, int16_t *bp, int16_t *hp);
 	void update_variable(const int16_t *in, const int16_t *ctl,
 		int16_t *lp, int16_t *bp, int16_t *hp);
+	void update_tpt(const int16_t *in, const int16_t *ctl,
+		int16_t *lp, int16_t *bp, int16_t *hp, int16_t *mixout);
+	// TPT filter: targets set by frequency()/resonance()/octaveControl(), the values
+	// reached at the end of the last block (changes are ramped over a block), and state
+	float tpt_log2fc = 9.966f, tpt_k = 1.414f, tpt_gain = 1.0f, tpt_oct = 1.0f;
+	float tpt_log2fc_now = 0, tpt_k_now = 0, tpt_gain_now = 0, tpt_oct_now = 0;
+	bool tpt_started = false;
+	float tpt_s1 = 0, tpt_s2 = 0;
+	float tpt_g = 0, tpt_hc = 0; // coefficients at the last update point
 	int32_t setting_fcenter;
 	int32_t setting_fmult;
 	int32_t setting_octavemult;

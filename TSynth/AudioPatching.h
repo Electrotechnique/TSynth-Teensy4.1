@@ -9,11 +9,11 @@
 
 class Mixer {
     private:
-    AudioMixer4& mixer;
+    AudioMixer4TS& mixer;
     uint8_t index;
 
     public:
-    Mixer(AudioMixer4& mixer_, uint8_t index_): mixer(mixer_), index(index_) {}
+    Mixer(AudioMixer4TS& mixer_, uint8_t index_): mixer(mixer_), index(index_) {}
 
     void gain(float value) {
         mixer.gain(index, value);
@@ -23,22 +23,22 @@ class Mixer {
 struct PatchShared {
     AudioSynthWaveformDcTS pitchBend;
     AudioSynthWaveformTS pitchLfo;
-    AudioMixer4 pitchMixer;
+    AudioMixer4TS pitchMixer;
     AudioSynthWaveformTS pwmLfoA;
     AudioSynthWaveformTS pwmLfoB;
     AudioSynthWaveformTS filterLfo;
     AudioSynthWaveformDcTS pwa;
     AudioSynthWaveformDcTS pwb;
-    AudioMixer4 noiseMixer;
+    AudioMixer4TS noiseMixer;
 
-    AudioMixer4 voiceMixer[3];
-    AudioMixer4 voiceMixerM;
+    AudioMixer4TS voiceMixer[3];
+    AudioMixer4TS voiceMixerM;
 
     AudioEffectEnsemble ensemble;
     AudioFilterStateVariableTS dcOffsetFilter;
-    AudioMixer4 volumeMixer;
-    AudioMixer4 effectMixerL;
-    AudioMixer4 effectMixerR;
+    AudioMixer4TS volumeMixer;
+    AudioMixer4TS effectMixerL;
+    AudioMixer4TS effectMixerR;
 
     AudioConnection connections[12] = {
         {pitchBend, 0, pitchMixer, 0},
@@ -70,7 +70,7 @@ struct PatchShared {
         whiteNoiseConnection = new AudioConnection(white, 0, noiseMixer, 1);
     }
 
-    void connectOutput(AudioMixer4& left, AudioMixer4& right, uint8_t index) {
+    void connectOutput(AudioMixer4TS& left, AudioMixer4TS& right, uint8_t index) {
         delete outputLConnection;
         delete outputRConnection;
         outputLConnection = new AudioConnection(effectMixerL, 0, left, index);
@@ -82,32 +82,32 @@ struct PatchShared {
 struct Patch {
     AudioEffectEnvelopeTS filterEnvelope_;
 
-    AudioMixer4 pwMixer_a;
-    AudioMixer4 pwMixer_b;
+    AudioMixer4TS pwMixer_a;
+    AudioMixer4TS pwMixer_b;
 
     AudioSynthWaveformDcTS glide_;
 
     AudioSynthWaveformDcTS keytracking_;
 
-    AudioMixer4 oscModMixer_a;
-    AudioMixer4 oscModMixer_b;
+    AudioMixer4TS oscModMixer_a;
+    AudioMixer4TS oscModMixer_b;
 
     AudioSynthWaveformModulatedTS waveformMod_a;
     AudioSynthWaveformModulatedTS waveformMod_b;
 
     AudioEffectDigitalCombine oscFX_;
 
-    AudioMixer4 waveformMixer_;
+    AudioMixer4TS waveformMixer_;
 
-    AudioMixer4 filterModMixer_;
+    AudioMixer4TS filterModMixer_;
 
     AudioFilterStateVariableTS filter_;
 
-    AudioMixer4 filterMixer_;
+    // The LP/BP/HP mix is done inside filter_ (see AudioFilterStateVariableTS::mix)
 
     AudioEffectEnvelopeTS ampEnvelope_;
 
-    AudioConnection connections[25] = {
+    AudioConnection connections[22] = {
         {keytracking_, 0, filterModMixer_, 2},
         {pwMixer_a, 0, waveformMod_a, 1},
         {pwMixer_b, 0, waveformMod_b, 1},
@@ -121,10 +121,7 @@ struct Patch {
         {oscFX_, 0, waveformMixer_, 3},
         {waveformMixer_, 0, filter_, 0},
         {filterModMixer_, 0, filter_, 1},
-        {filter_, 0, filterMixer_, 0},
-        {filter_, 1, filterMixer_, 1},
-        {filter_, 2, filterMixer_, 2},
-        {filterMixer_, ampEnvelope_},
+        {filter_, 0, ampEnvelope_, 0},
         // Mod sources
         {oscModMixer_a, 0, waveformMod_a, 0},
         {oscModMixer_b, 0, waveformMod_b, 0},
@@ -183,7 +180,10 @@ struct Patch {
 
 struct Global {
     private:
-    static const uint8_t MAX_NO_TIMBER = 2;
+    // Only one voice group (12 voices) is ever created, using SharedAudio[0]. A second set of
+    // shared objects (LFOs, mixers, ensemble, DC filter...) used to be built and ran every
+    // block producing silence.
+    static const uint8_t MAX_NO_TIMBER = 1;
     static const uint8_t MAX_NO_VOICE = 12;
 
     public:
@@ -193,10 +193,11 @@ struct Global {
     AudioSynthNoiseWhite     white;
     AudioAnalyzePeak         peak;
     Oscilloscope             scope;
-    AudioMixer4              effectMixerR[3];
-    AudioMixer4              effectMixerRM;
-    AudioMixer4              effectMixerL[3];
-    AudioMixer4              effectMixerLM;
+    AudioCpuGuard            cpuGuard;
+    AudioMixer4TS              effectMixerR[3];
+    AudioMixer4TS              effectMixerRM;
+    AudioMixer4TS              effectMixerL[3];
+    AudioMixer4TS              effectMixerLM;
     AudioOutputI2S           i2s;
 
     PatchShared SharedAudio[MAX_NO_TIMBER];
@@ -204,19 +205,21 @@ struct Global {
 
     AudioControlSGTL5000     sgtl5000_1;
 
-    AudioConnection connectionsArray[12] = {
+    AudioConnection connectionsArray[13] = {
         {effectMixerL[0], 0, effectMixerLM, 0},
         {effectMixerL[1], 0, effectMixerLM, 1},
         {effectMixerL[2], 0, effectMixerLM, 2},
         {effectMixerR[0], 0, effectMixerRM, 0},
         {effectMixerR[1], 0, effectMixerRM, 1},
         {effectMixerR[2], 0, effectMixerRM, 2},
-        {effectMixerLM, 0, scope, 0},
+        // Scope taps the voices before the effects (DC removed, before volume) for a clean trace
+        {SharedAudio[0].dcOffsetFilter, 2, scope, 0},
         {effectMixerLM, 0, peak, 0},
         {effectMixerRM, 0, usbAudio, 1},
         {effectMixerRM, 0, i2s, 1},
         {effectMixerLM, 0, i2s, 0},
-        {effectMixerLM, 0, usbAudio, 0}
+        {effectMixerLM, 0, usbAudio, 0},
+        {effectMixerLM, 0, cpuGuard, 0} // only so it runs every update
     };
 
     std::vector<AudioConnection*> connections;
@@ -246,6 +249,7 @@ struct Global {
             //This removes dc offset (mostly from unison pulse waves) before the ensemble effect
             SharedAudio[i].dcOffsetFilter.octaveControl(1.0f);
             SharedAudio[i].dcOffsetFilter.frequency(12.0f);//Lower values will give clicks on note on/off
+            SharedAudio[i].dcOffsetFilter.softClip(false); // Keep the main signal path linear
         }
 
         constant1Dc.amplitude(1.0);
