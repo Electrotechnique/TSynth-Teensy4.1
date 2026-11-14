@@ -21,7 +21,7 @@
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
 
-  ElectroTechnique TSynth - Firmware Rev 3.00
+  ElectroTechnique TSynth - Firmware Rev 3.01
   TEENSY 4.1 - 12 VOICES
 
   Arduino IDE Tools Settings:
@@ -1696,6 +1696,7 @@ void checkSwitches()
       state = PARAMETER;
       break;
     case SETTINGSVALUE:
+      cancelSettingPreview();
       state = SETTINGS;
       showSettingsPage();
       break;
@@ -1819,6 +1820,25 @@ void checkPendingPatchRecall()
   settings::decrement_setting();
 }
 
+// Settings whose choices are shown as you scroll, before they are saved (Display)
+void previewSettingValue()
+{
+  if (strcmp(settings::current_setting(), "Display") == 0)
+  {
+    const char *value = settings::current_setting_value();
+    for (uint8_t i = 0; i < DISPLAY_TYPES; i++)
+      if (strcmp(value, displayVariants[i].name) == 0)
+        requestDisplayVariant(i);
+  }
+}
+
+// Back without saving: undo the preview
+void cancelSettingPreview()
+{
+  if (strcmp(settings::current_setting(), "Display") == 0)
+    requestDisplayVariant(getDisplayType());
+}
+
 void checkEncoder()
 {
   // Encoder works with relative inc and dec values
@@ -1855,6 +1875,7 @@ void checkEncoder()
       break;
     case SETTINGSVALUE:
       settings::increment_setting_value();
+      previewSettingValue();
       showSettingsPage();
       break;
     }
@@ -1891,6 +1912,7 @@ void checkEncoder()
       break;
     case SETTINGSVALUE:
       settings::decrement_setting_value();
+      previewSettingValue();
       showSettingsPage();
       break;
     }

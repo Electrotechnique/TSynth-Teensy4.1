@@ -30,6 +30,44 @@
 
 ST7735_t3 tft = ST7735_t3(cs, dc, mosi, sclk, rst);
 
+// Display panel variants. Some TSynth builds have a slightly different 0.96" 80x160 panel:
+// colours inverted, RGB/BGR swapped, mirrored or upside down, or shifted by a pixel.
+// Chosen in Settings > Display (previewed live while scrolling); hold Back at power on to
+// go back to Standard. Offsets are for the GREENTAB set up in rotation 3.
+#define DISP_MY  0x80 // MADCTL bits
+#define DISP_MX  0x40
+#define DISP_MV  0x20
+#define DISP_BGR 0x08
+struct DisplayVariant {
+  const char *name;
+  bool invert;
+  uint8_t madctl;
+  uint8_t xstart, ystart;
+};
+const DisplayVariant displayVariants[DISPLAY_TYPES] = {
+  {"Standard",    true,  DISP_MX | DISP_MV | DISP_BGR, 1, 2},
+  {"No invert",   false, DISP_MX | DISP_MV | DISP_BGR, 1, 2},
+  {"Blue tab",    true,  DISP_MV,                      0, 2}, // MV | RGB, row offset 0 (discussion #4)
+  {"Blue no inv", false, DISP_MV,                      0, 2},
+  {"RGB order",   true,  DISP_MX | DISP_MV,            1, 2},
+  {"No offset",   true,  DISP_MX | DISP_MV | DISP_BGR, 0, 2},
+  {"Mirrored",    true,  DISP_MV | DISP_BGR,           1, 2},
+  {"Upside down", true,  DISP_MY | DISP_MV | DISP_BGR, 1, 2},
+};
+volatile int8_t pendingDisplayVariant = -1; // applied by the display thread between frames
+
+void applyDisplayVariant(uint8_t type) {
+  if (type >= DISPLAY_TYPES) type = 0;
+  const DisplayVariant &v = displayVariants[type];
+  tft.setPanelVariant(v.invert, v.madctl, v.xstart, v.ystart);
+}
+
+// From the main loop: change the panel set up at the next frame (not during a transfer)
+void requestDisplayVariant(uint8_t type) {
+  pendingDisplayVariant = type;
+}
+
+
 String currentParameter = "";
 String currentValue = "";
 float currentFloatValue = 0.0;
@@ -449,9 +487,13 @@ float scopePeriodSamples()
   return AUDIO_SAMPLE_RATE_EXACT / freq;
 }
 
-void updateScreenDMA() {
-  global.scope.setPeriod(scopePeriodSamples());
-  global.scope.Display(); // Draws only if the scope is enabled
+// drawScope: only on the main patch page (patch number, name and voice grid), not on
+// parameter, menu, save/recall or settings pages
+void updateScreenDMA(bool drawScope) {
+  if (drawScope) {
+    global.scope.setPeriod(scopePeriodSamples());
+    global.scope.Display(); // Draws only if the scope is enabled
+  }
   // One DMA transfer for the whole frame (~14ms), polled. See ST7735_t3::oneShotUpdate().
   if (tft.oneShotUpdate()) {
     elapsedMillis wait;
@@ -475,6 +517,11 @@ void displayThread() {
   while (1) {
     frameTime = 0;
     bool reinitPause = false;
+    bool mainPage = false; // the patch page, the only one with the oscilloscope
+    if (pendingDisplayVariant >= 0) {
+      applyDisplayVariant(pendingDisplayVariant);
+      pendingDisplayVariant = -1;
+    }
     // Render into the frame buffer while holding the lock, so the main loop can't change
     // the Strings and patch list being drawn. The SPI transfer below runs without it.
     displayLock.lock();
@@ -483,6 +530,7 @@ void displayThread() {
         if ((millis() - timer) > DISPLAYTIMEOUT) {
           pickUpActive = false;
           renderCurrentPatchPage();
+          mainPage = true;
         } else {
           pickUpActive = pickUp;
           renderCurrentParameterPage();
@@ -503,6 +551,7 @@ void displayThread() {
         break;
       case PATCH:
         renderCurrentPatchPage();
+        mainPage = true;
         break;
       case DELETE:
         renderDeletePatchPage();
@@ -516,7 +565,7 @@ void displayThread() {
         break;
     }
     displayLock.unlock();
-    updateScreenDMA();
+    updateScreenDMA(mainPage);
     if (reinitPause) {
       threads.delay(1000);
       state = PARAMETER;
@@ -532,6 +581,14 @@ void setupDisplay() {
   tft.useFrameBuffer(true);
   tft.setRotation(3);
   tft.invertDisplay(true);
+  // Panel variant from Settings, or Standard if Back is held at power on (for a setting
+  // that made the screen unreadable)
+  pinMode(BACK_SW, INPUT_PULLUP);
+  delay(5);
+  if (digitalRead(BACK_SW) == LOW) {
+    storeDisplayType(0);
+  }
+  applyDisplayVariant(getDisplayType());
   renderBootUpPage();
   tft.updateScreen();
   int displayThreadId = threads.addThread(displayThread, 0, DISPLAY_THREAD_STACK);

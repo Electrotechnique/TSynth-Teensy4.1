@@ -222,6 +222,10 @@ class ST7735_t3 : public Adafruit_GFX {
   bool  oneShotUpdate(void);         // start; false if it couldn't be started
   bool  oneShotUpdateActive(void);   // true while sending; finishes the transfer when done
   void  oneShotUpdateAbort(void);    // stop a transfer that never finished
+  // TSynth: adapt to a panel variant without re-initialising: colour inversion, MADCTL
+  // (scan direction / mirroring / RGB or BGR order) and the drawing offset. Must not be
+  // called while a frame transfer is in progress.
+  void  setPanelVariant(bool invert, uint8_t madctl, uint16_t xstart, uint16_t ystart);
   #endif
   #else
   // added support to use optional Frame buffer

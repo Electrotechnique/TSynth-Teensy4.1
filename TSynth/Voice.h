@@ -124,9 +124,15 @@ class Voice {
             Patch& osc = this->patch();
 
             if (params.unisonMode == 1) {
+                // Spread the unison oscillators evenly (in cents) either side of the played
+                // pitch. DETUNE gives each oscillator's place in the spread, 0 to 1. The
+                // spread is as wide as before (detune x pitch up to the pitch), but it used to
+                // sit entirely below the pitch: the stack was flat by half the detune (about
+                // 53 cents at full detune) and voice 1 always took the full amount (issue #125).
                 int offset = 2 * this->index();
-                osc.waveformMod_a.frequency(NOTEFREQS[this->_note + params.oscPitchA] * (params.detune + ((1 - params.detune) * DETUNE[notesOn - 1][offset])));
-                osc.waveformMod_b.frequency(NOTEFREQS[this->_note + params.oscPitchB] * (params.detune + ((1 - params.detune) * DETUNE[notesOn - 1][offset + 1])));
+                const float width = -log2f(params.detune); // octaves
+                osc.waveformMod_a.frequency(NOTEFREQS[this->_note + params.oscPitchA] * exp2f((DETUNE[notesOn - 1][offset] - 0.5f) * width));
+                osc.waveformMod_b.frequency(NOTEFREQS[this->_note + params.oscPitchB] * exp2f((DETUNE[notesOn - 1][offset + 1] - 0.5f) * width));
             } else if (params.unisonMode == 2) {
                 // TODO: This approach doesn't make sense with voices spread across multiple timbres.
                 osc.waveformMod_a.frequency(NOTEFREQS[this->_note + params.oscPitchA + CHORD_DETUNE[this->index()][params.chordDetune]]) ;

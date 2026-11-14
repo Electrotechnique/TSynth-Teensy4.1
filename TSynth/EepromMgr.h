@@ -14,6 +14,8 @@
 #define EEPROM_FILT_ENV 11
 #define EEPROM_GLIDE_SHAPE 12
 #define EEPROM_VOICE_RETRIG 13
+#define EEPROM_DISPLAY_TYPE 14
+#define DISPLAY_TYPES 8
 
 FLASHMEM void storeGlideShape(byte type){
   EEPROM.update(EEPROM_GLIDE_SHAPE, type);
@@ -144,6 +146,15 @@ FLASHMEM boolean getSameVoiceRetrig() {
 }
 FLASHMEM void storeSameVoiceRetrig(byte value){
   EEPROM.update(EEPROM_VOICE_RETRIG, value);
+}
+
+// Display panel variant (see ST7735Display.h); 0 = standard
+FLASHMEM byte getDisplayType() {
+  byte v = EEPROM.read(EEPROM_DISPLAY_TYPE);
+  return v < DISPLAY_TYPES ? v : 0;
+}
+FLASHMEM void storeDisplayType(byte value){
+  EEPROM.update(EEPROM_DISPLAY_TYPE, value);
 }
 
 FLASHMEM boolean getVUEnable() {
